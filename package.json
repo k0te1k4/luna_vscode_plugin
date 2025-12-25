@@ -1,0 +1,55 @@
+{
+  "name": "luna-lang-support",
+  "displayName": "LuNA Language Support",
+  "description": "Подсветка синтаксиса, автодополнение и LSP для языка LuNA (.fa + ucodes.cpp).",
+  "version": "0.0.2",
+  "publisher": "localuser",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:luna",
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "luna",
+        "aliases": [
+          "LuNA",
+          "luna"
+        ],
+        "extensions": [
+          ".fa"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "luna",
+        "scopeName": "source.luna",
+        "path": "./syntaxes/luna.tmLanguage.json"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p .",
+    "watch": "tsc -watch -p ."
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^18.0.0"
+  },
+  "dependencies": {
+  "vscode-languageclient": "^9.0.1",
+  "vscode-languageserver": "^9.0.1",
+  "vscode-languageserver-textdocument": "^1.0.8"
+  }
+}

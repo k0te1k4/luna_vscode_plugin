@@ -1,0 +1,64 @@
+{
+  "scopeName": "source.luna",
+  "name": "LuNA",
+  "fileTypes": [
+    "fa"
+  ],
+  "patterns": [
+    {
+      "name": "comment.line.double-slash.luna",
+      "match": "//.*$"
+    },
+    {
+      "name": "string.quoted.double.luna",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.luna",
+          "match": "\\\\."
+        }
+      ]
+    },
+    {
+      "name": "constant.numeric.luna",
+      "match": "\\b[0-9]+(\\.[0-9]+)?\\b"
+    },
+    {
+      "name": "keyword.control.luna",
+      "match": "\\b(sub|cf|df|stealable|import|for|while|if|else|return)\\b"
+    },
+    {
+      "name": "storage.type.luna",
+      "match": "\\b(int|real|string|name|value)\\b"
+    },
+    {
+      "name": "keyword.other.luna",
+      "match": "\\b(request|req_count|delete|nfparam|locator_cyclic|locator_replicating|after)\\b"
+    },
+    {
+      "name": "punctuation.section.recommendation.luna",
+      "begin": "@\\s*\\{",
+      "end": "\\}",
+      "patterns": [
+        {
+          "include": "#insideRecommendation"
+        }
+      ]
+    },
+    {
+      "name": "entity.name.function.luna",
+      "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\s*(?=\\()"
+    }
+  ],
+  "repository": {
+    "insideRecommendation": {
+      "patterns": [
+        {
+          "name": "keyword.other.recommendation.luna",
+          "match": "\\b(request|req_count|delete|after)\\b"
+        }
+      ]
+    }
+  }
+}

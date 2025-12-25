@@ -122,7 +122,3 @@ Authorization: Api-Key <API_key>
 npm install
 npm run compile
 ```
-
-## Лицензия
-
-Укажите вашу лицензию (например, MIT) в `package.json` и добавьте `LICENSE`.

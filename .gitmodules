@@ -1,0 +1,3 @@
+[submodule "luna.wiki"]
+	path = luna.wiki
+	url = https://gitlab.ssd.sscc.ru/luna/luna.wiki.git

@@ -8,6 +8,9 @@ import {
   TransportKind
 } from 'vscode-languageclient/node';
 
+import { LunaAssistantService } from './assistant/service';
+import { AssistantPanel } from './assistant/panel';
+
 let client: LanguageClient | undefined;
 
 const LUNA_KEYWORDS = [
@@ -37,6 +40,41 @@ const LUNA_SNIPPETS: { label: string; insertText: vscode.SnippetString; document
 ];
 
 export function activate(context: vscode.ExtensionContext) {
+  const assistant = new LunaAssistantService(context);
+  const panel = new AssistantPanel(context, {
+    onAsk: async (q) => assistant.ask(q),
+    onReindex: async () => assistant.reindexWiki()
+  });
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('luna.assistant.open', () => panel.show()),
+    vscode.commands.registerCommand('luna.assistant.reindexWiki', () => assistant.reindexWiki()),
+    vscode.commands.registerCommand('luna.assistant.toggle', async () => {
+      await assistant.toggleEnabled();
+      const enabled = await assistant.isEnabled();
+      vscode.window.showInformationMessage(`LuNA AI Assistant: ${enabled ? 'enabled' : 'disabled'}.`);
+    }),
+    vscode.commands.registerCommand('luna.assistant.setApiKey', () => assistant.setApiKeyInteractively())
+  );
+
+  const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+  status.command = 'luna.assistant.open';
+  status.tooltip = 'LuNA AI Assistant (Wiki RAG)';
+  status.text = 'LuNA AI: off';
+  status.show();
+  context.subscriptions.push(status);
+
+  const updateStatus = async () => {
+    const enabled = await assistant.isEnabled();
+    status.text = enabled ? 'LuNA AI: on' : 'LuNA AI: off';
+  };
+  updateStatus();
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e => {
+    if (e.affectsConfiguration('luna.assistant.enabled')) {
+      updateStatus();
+    }
+  }));
+
   // Общий провайдер автодополнения для .fa и ucodes.cpp
   const selector: vscode.DocumentSelector = [
     { scheme: 'file', language: 'luna' },

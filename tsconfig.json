@@ -3,7 +3,8 @@
     "module": "commonjs",
     "target": "ES2018",
     "lib": [
-      "ES2018"
+      "ES2018",
+      "DOM"
     ],
     "outDir": "out",
     "sourceMap": true,
@@ -14,6 +15,7 @@
     "skipLibCheck": true
   },
   "include": [
-    "extension.ts"
+    "extension.ts",
+    "**/*.ts"
   ]
 }

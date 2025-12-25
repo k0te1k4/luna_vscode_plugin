@@ -1,60 +1,128 @@
-# LuNA Language Support (VSCode Extension)
+# LuNA Language Support (VS Code)
 
-Расширение добавляет поддержку языка **LuNA** в Visual Studio Code: подсветка `.fa`, автодополнение, диагностика связки `.fa` ↔ `ucodes.cpp`, навигация и быстрые исправления.
+Расширение для Visual Studio Code для работы с языком **LuNA** (`.fa`) и файлом **ucodes.cpp**.
 
-**Поддерживаемые файлы**
+## Возможности
 
-* `*.fa` (LuNA)
-* `ucodes.cpp` (C++ ядра, вызываемые из LuNA)
+Работает **без ИИ** по умолчанию.
 
-### Возможности
+### Базовые возможности (не зависят от ИИ)
 
-* Подсветка синтаксиса LuNA (`sub`, `cf`, `df`, типы, `@ { ... }`, комментарии `//`)
-* Автодополнение:
+1. **Подсветка синтаксиса** для `.fa`.
+2. **Автодополнение**:
+   * ключевые слова LuNA (`sub`, `df`, `cf`, `request`, `delete`, ...)
+   * сниппеты (фрагмент `cf`, заготовка `sub`, блок рекомендаций `@ { ... }`).
+3. **LSP / Language Server** (включается автоматически):
+   * работает для `.fa`
+   * также подключён к `.cpp` (чтобы не ругаться на `ucodes.cpp` рядом).
+4. **Подсказка создать `ucodes.cpp`**, если вы создали/изменили `.fa`, а `ucodes.cpp` рядом отсутствует.
 
-  * ключевые слова LuNA
-  * сниппеты `cf`, `sub`, `@ { ... }`
-  * имена `sub`/`cf` фрагментов из проекта
-  * алиасы импортированных C-ядер (`import c_xxx(...) as alias`)
-  * сниппет `cf alias: alias();` для реализованных ядер
-  * сниппет `implement c_xxx` в `ucodes.cpp` для отсутствующих реализаций
-* Диагностика:
+### Опционально: LuNA AI Assistant (RAG по wiki)
 
-  * вызов ядра в `.fa`, которого нет в `ucodes.cpp`
-  * несовпадение числа аргументов ядра
-  * несовпадение типов аргументов (по упрощённому извлечению типов)
-  * hint для ядер в `ucodes.cpp`, которые нигде не используются
-* Навигация:
+Если включить опцию `luna.assistant.enabled`, расширение получает простого **AI-ассистента**, который:
 
-  * Go to Definition из `.fa` на `void c_xxx(...)` в `ucodes.cpp`
-  * Hover: “реализовано/не найдено” и “используется/не используется”
-* Quick Fix:
+* строит локальный индекс по **LuNA wiki** (Markdown-файлы в git submodule)
+* отвечает на вопросы, опираясь на найденные фрагменты wiki (RAG)
 
-  * создать заглушку `extern "C" void c_xxx() { ... }` в `ucodes.cpp` по диагностике missing-kernel
-* Подсказка создания `ucodes.cpp`:
+Ассистент **не обязателен**: если он выключен, остальной функционал работает как обычно.
 
-  * при создании/изменении `.fa` если рядом нет `ucodes.cpp`, расширение предлагает создать шаблон
+> Текущая реализация делает RAG локально:
+> * эмбеддинги и генерация — через Yandex AI Studio API
+> * сам индекс (векторы + тексты) хранится в workspace (`.luna/assistant/index.json`)
 
-### Установка (локально)
+## Быстрый старт (без ассистента)
 
-1. Склонируйте репозиторий
-2. Установите зависимости:
+1. Установите расширение.
+2. Откройте проект с файлами `.fa`.
+3. Подсветка, автодополнение и LSP включатся автоматически.
 
-   * `npm install`
-3. Соберите:
+## Подключение LuNA wiki через git submodule (для ассистента)
 
-   * `npm run compile`
-4. Запуск в режиме разработки:
+В корне вашего репозитория выполните:
 
-   * откройте проект в VSCode
-   * `Run and Debug` → “Run Extension” (см. `.vscode/launch.json`)
+```bash
+git submodule add <URL_вашего_gitlab_репозитория_luna_wiki> luna.wiki
+git submodule update --init --recursive
+```
 
-### Ограничения парсинга (важно)
+По умолчанию расширение ожидает wiki по пути `luna.wiki` (настраивается).
 
-Language Server использует **построчные регулярные выражения**, не полноценный AST:
+## Настройка Yandex AI Studio (для ассистента)
 
-* `import ... as ...` должен быть в одной строке
-* `cf ...: kernel(a,b,c)` делит аргументы по запятым без учёта вложенных выражений
-* сигнатуры C распознаются только как `void c_name(...)`
-* типы параметров C определяются эвристикой (int/real/string/value)
+Ассистент использует **Yandex AI Studio API** и аутентификацию через заголовок:
 
+```
+Authorization: Api-Key <API_key>
+```
+
+Документация: API authentication в Yandex AI Studio.
+
+### 1) Получите API key
+
+Создайте service account и API key в Yandex Cloud (AI Studio рекомендует использовать API key для service account).
+
+### 2) Укажите modelUri
+
+Для эмбеддингов документации Yandex рекомендует пары моделей для поиска:
+
+* `emb://<folder_ID>/text-search-doc/latest`
+* `emb://<folder_ID>/text-search-query/latest`
+
+Если вы заполните `luna.assistant.yandexFolderId`, расширение **автоматически подставит эти значения**, если поля modelUri пустые.
+
+Для генерации ответа используется Text Generation API (`/foundationModels/v1/completion`).
+
+`luna.assistant.generationModelUri` зависит от выбранной модели в AI Studio (примерный формат: `gpt://<folder_ID>/...`).
+
+## Как включить ассистента
+
+1. В **настройках VS Code** включите:
+   * `LuNA › Assistant: Enabled` (`luna.assistant.enabled`)
+2. Выполните команду:
+   * **LuNA: Set Yandex API Key**
+   (ключ сохранится в Secret Storage VS Code)
+3. Выполните команду:
+   * **LuNA: Reindex Wiki for Assistant**
+4. Откройте чат:
+   * **LuNA: Open AI Assistant**
+
+## Команды
+
+* `LuNA: Open AI Assistant` — открыть окно чата.
+* `LuNA: Reindex Wiki for Assistant` — пересобрать индекс wiki.
+* `LuNA: Toggle AI Assistant` — включить/выключить ассистента в настройках workspace.
+* `LuNA: Set Yandex API Key` — сохранить API key в Secret Storage.
+
+## Где хранится индекс
+
+По умолчанию: `.luna/assistant/index.json` в корне workspace.
+
+Файл содержит:
+
+* `chunks[]`: текстовые фрагменты wiki
+* `embedding[]`: вектор эмбеддинга
+
+⚠️ Не добавляйте этот индекс в публичный репозиторий, если в wiki есть закрытая информация.
+
+## Как работает RAG в расширении
+
+1. **Индексация** (`Reindex Wiki`)
+   * находит все `.md/.markdown` в папке wiki
+   * режет по заголовкам `# ...` и по ~`chunkChars`
+   * для каждого чанка вызывает Embeddings API (`/foundationModels/v1/textEmbedding`)
+   * сохраняет в локальный JSON
+2. **Вопрос**
+   * строит эмбеддинг вопроса (query-модель)
+   * находит Top‑K похожих чанков (cosine similarity)
+   * отправляет в Text Generation API промпт: «ответь только на основе этих фрагментов»
+
+## Сборка/разработка
+
+```bash
+npm install
+npm run compile
+```
+
+## Лицензия
+
+Укажите вашу лицензию (например, MIT) в `package.json` и добавьте `LICENSE`.

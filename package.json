@@ -12,7 +12,14 @@
   ],
   "activationEvents": [
     "onLanguage:luna",
-    "onStartupFinished"
+    "onStartupFinished",
+    "onCommand:luna.assistant.open",
+    "onCommand:luna.assistant.reindexWiki",
+    "onCommand:luna.assistant.toggle",
+    "onCommand:luna.assistant.setApiKey",
+    "onCommand:luna.assistant.explainSelection",
+    "onCommand:luna.assistant.explainFile"
+
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -35,7 +42,110 @@
         "scopeName": "source.luna",
         "path": "./syntaxes/luna.tmLanguage.json"
       }
-    ]
+    ],
+    "commands": [
+      {
+        "command": "luna.assistant.open",
+        "title": "LuNA: Open AI Assistant"
+      },
+      {
+        "command": "luna.assistant.reindexWiki",
+        "title": "LuNA: Reindex Wiki for Assistant"
+      },
+      {
+        "command": "luna.assistant.toggle",
+        "title": "LuNA: Toggle AI Assistant"
+      },
+      {
+        "command": "luna.assistant.setApiKey",
+        "title": "LuNA: Set Yandex API Key"
+      },
+      {
+        "command": "luna.assistant.explainSelection",
+        "title": "LuNA: Explain Selection"
+      },
+      {
+        "command": "luna.assistant.explainFile",
+        "title": "LuNA: Explain File"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+         "command": "luna.assistant.explainSelection",
+         "when": "editorHasSelection && (resourceExtname == '.fa' || resourceExtname == '.cpp' || resourceExtname == '.cc' || resourceExtname == '.cxx' || resourceExtname == '.h' || resourceExtname == '.hpp' || resourceExtname == '.hh')",
+          "group": "navigation@20"
+        },
+        {
+          "command": "luna.assistant.explainFile",
+          "when": "resourceExtname == '.fa' || resourceExtname == '.cpp' || resourceExtname == '.cc' || resourceExtname == '.cxx' || resourceExtname == '.h' || resourceExtname == '.hpp' || resourceExtname == '.hh'",
+          "group": "navigation@21"
+        }
+      ]
+    },
+
+    "configuration": {
+      "properties": {
+        "luna.assistant.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Включить LuNA AI Assistant (RAG по wiki). Если выключено — плагин работает как раньше, без сети и без ИИ."
+        },
+        "luna.assistant.wikiSubmodulePath": {
+          "type": "string",
+          "default": "luna.wiki",
+          "description": "Путь к git submodule с LuNA wiki относительно корня workspace (папка с Markdown-файлами)."
+        },
+        "luna.assistant.indexStoragePath": {
+          "type": "string",
+          "default": ".luna/assistant/index.json",
+          "description": "Куда сохранять локальный индекс (эмбеддинги + метаданные). Относительно корня workspace."
+        },
+        "luna.assistant.yandexFolderId": {
+          "type": "string",
+          "default": "",
+          "description": "Folder ID в Yandex Cloud. Нужен, чтобы сформировать modelUri для эмбеддингов/генерации (например emb://<folder>/text-search-doc/latest)."
+        },
+        "luna.assistant.docEmbeddingModelUri": {
+          "type": "string",
+          "default": "",
+          "description": "Model URI для эмбеддингов документов. Рекомендуется: emb://<folder_ID>/text-search-doc/latest"
+        },
+        "luna.assistant.queryEmbeddingModelUri": {
+          "type": "string",
+          "default": "",
+          "description": "Model URI для эмбеддингов запросов. Рекомендуется: emb://<folder_ID>/text-search-query/latest"
+        },
+        "luna.assistant.generationModelUri": {
+          "type": "string",
+          "default": "",
+          "description": "Model URI для генерации ответа. Пример: gpt://<folder_ID>/yandexgpt/latest (уточните в AI Studio)."
+        },
+        "luna.assistant.topK": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 20,
+          "description": "Сколько фрагментов wiki подмешивать в контекст RAG (Top-K по похожести)."
+        },
+        "luna.assistant.chunkChars": {
+          "type": "number",
+          "default": 1800,
+          "minimum": 300,
+          "maximum": 8000,
+          "description": "Размер чанка (примерно, в символах) при разбиении wiki на фрагменты для индекса."
+        },
+        "luna.assistant.codeExplain.maxChars": {
+          "type": "number",
+          "default": 16000,
+          "minimum": 2000,
+          "maximum": 200000,
+          "description": "Максимальный размер кода (в символах), отправляемого на объяснение."
+        }
+
+      },
+      "title": "LuNA"
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
@@ -48,8 +158,8 @@
     "@types/node": "^18.0.0"
   },
   "dependencies": {
-  "vscode-languageclient": "^9.0.1",
-  "vscode-languageserver": "^9.0.1",
-  "vscode-languageserver-textdocument": "^1.0.8"
+    "vscode-languageclient": "^9.0.1",
+    "vscode-languageserver": "^9.0.1",
+    "vscode-languageserver-textdocument": "^1.0.8"
   }
 }

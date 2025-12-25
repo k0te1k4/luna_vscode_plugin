@@ -16,7 +16,10 @@
     "onCommand:luna.assistant.open",
     "onCommand:luna.assistant.reindexWiki",
     "onCommand:luna.assistant.toggle",
-    "onCommand:luna.assistant.setApiKey"
+    "onCommand:luna.assistant.setApiKey",
+    "onCommand:luna.assistant.explainSelection",
+    "onCommand:luna.assistant.explainFile"
+
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -56,8 +59,31 @@
       {
         "command": "luna.assistant.setApiKey",
         "title": "LuNA: Set Yandex API Key"
+      },
+      {
+        "command": "luna.assistant.explainSelection",
+        "title": "LuNA: Explain Selection"
+      },
+      {
+        "command": "luna.assistant.explainFile",
+        "title": "LuNA: Explain File"
       }
     ],
+    "menus": {
+      "editor/context": [
+        {
+         "command": "luna.assistant.explainSelection",
+         "when": "editorHasSelection && (resourceExtname == '.fa' || resourceExtname == '.cpp' || resourceExtname == '.cc' || resourceExtname == '.cxx' || resourceExtname == '.h' || resourceExtname == '.hpp' || resourceExtname == '.hh')",
+          "group": "navigation@20"
+        },
+        {
+          "command": "luna.assistant.explainFile",
+          "when": "resourceExtname == '.fa' || resourceExtname == '.cpp' || resourceExtname == '.cc' || resourceExtname == '.cxx' || resourceExtname == '.h' || resourceExtname == '.hpp' || resourceExtname == '.hh'",
+          "group": "navigation@21"
+        }
+      ]
+    },
+
     "configuration": {
       "properties": {
         "luna.assistant.enabled": {
@@ -108,7 +134,15 @@
           "minimum": 300,
           "maximum": 8000,
           "description": "Размер чанка (примерно, в символах) при разбиении wiki на фрагменты для индекса."
+        },
+        "luna.assistant.codeExplain.maxChars": {
+          "type": "number",
+          "default": 16000,
+          "minimum": 2000,
+          "maximum": 200000,
+          "description": "Максимальный размер кода (в символах), отправляемого на объяснение."
         }
+
       },
       "title": "LuNA"
     }

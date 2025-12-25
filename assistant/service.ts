@@ -6,11 +6,12 @@ import { getApiKeyFromSecrets, setApiKeyInSecrets, YandexAiStudioClient } from '
 import { loadIndex, topKBySimilarity } from './vectorIndex';
 
 export class LunaAssistantService {
+  private output?: vscode.OutputChannel;
+
   constructor(private readonly context: vscode.ExtensionContext) {}
 
   async isEnabled(): Promise<boolean> {
-    const cfg = getAssistantConfig();
-    return cfg.enabled;
+    return getAssistantConfig().enabled;
   }
 
   async toggleEnabled(): Promise<void> {
@@ -33,22 +34,22 @@ export class LunaAssistantService {
   async reindexWiki(): Promise<void> {
     const ws = getWorkspaceRoot();
     if (!ws) throw new Error('Откройте папку (workspace) в VS Code.');
+
     const baseCfg = withDerivedDefaults(getAssistantConfig());
-    if (!baseCfg.enabled) {
-      throw new Error('Ассистент выключен. Включите настройку luna.assistant.enabled.');
-    }
+    if (!baseCfg.enabled) throw new Error('Ассистент выключен. Включите настройку luna.assistant.enabled.');
     if (!baseCfg.docEmbeddingModelUri) {
       throw new Error('Не задан luna.assistant.docEmbeddingModelUri (или luna.assistant.yandexFolderId для автоподстановки).');
     }
+
     const apiKey = await getApiKeyFromSecrets(this.context);
-    if (!apiKey) {
-      throw new Error('API key не задан. Запустите команду “LuNA: Set Yandex API Key”.');
-    }
+    if (!apiKey) throw new Error('API key не задан. Запустите команду “LuNA: Set Yandex API Key”.');
 
     const wikiRootAbs = path.join(ws, baseCfg.wikiSubmodulePath);
     const indexAbsPath = path.join(ws, baseCfg.indexStoragePath);
 
-    const client = new YandexAiStudioClient({ apiKey });
+    // Передаём folderId (если задан) — это важно для x-folder-id
+    const client = new YandexAiStudioClient({ apiKey, folderId: baseCfg.yandexFolderId || undefined });
+
     await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
@@ -74,10 +75,9 @@ export class LunaAssistantService {
   async ask(question: string): Promise<string> {
     const ws = getWorkspaceRoot();
     if (!ws) throw new Error('Откройте папку (workspace) в VS Code.');
+
     const baseCfg = withDerivedDefaults(getAssistantConfig());
-    if (!baseCfg.enabled) {
-      throw new Error('Ассистент выключен. Включите настройку luna.assistant.enabled.');
-    }
+    if (!baseCfg.enabled) throw new Error('Ассистент выключен. Включите настройку luna.assistant.enabled.');
 
     const apiKey = await getApiKeyFromSecrets(this.context);
     if (!apiKey) throw new Error('API key не задан. Запустите команду “LuNA: Set Yandex API Key”.');
@@ -86,16 +86,15 @@ export class LunaAssistantService {
       throw new Error('Не задан luna.assistant.queryEmbeddingModelUri (или luna.assistant.yandexFolderId для автоподстановки).');
     }
     if (!baseCfg.generationModelUri) {
-      throw new Error('Не задан luna.assistant.generationModelUri.');
+      throw new Error('Не задан luna.assistant.generationModelUri (например gpt://<folderId>/yandexgpt-lite/latest).');
     }
 
     const indexAbsPath = path.join(ws, baseCfg.indexStoragePath);
     const idx = await loadIndex(indexAbsPath);
-    if (!idx) {
-      throw new Error('Индекс не найден. Выполните “LuNA: Reindex Wiki for Assistant”.');
-    }
+    if (!idx) throw new Error('Индекс не найден. Выполните “LuNA: Reindex Wiki for Assistant”.');
 
-    const client = new YandexAiStudioClient({ apiKey });
+    const client = new YandexAiStudioClient({ apiKey, folderId: baseCfg.yandexFolderId || undefined });
+
     const qEmb = await client.embedText(baseCfg.queryEmbeddingModelUri, question);
     const top = topKBySimilarity(qEmb, idx.chunks, baseCfg.topK);
 
@@ -115,7 +114,7 @@ export class LunaAssistantService {
       `Вопрос: ${question}\n\n` +
       'Сформулируй ответ по-русски. Если используешь факты, укажи ссылки на номера фрагментов [#1], [#2], ...';
 
-    const answer = await client.completion(
+    return await client.completion(
       baseCfg.generationModelUri,
       [
         { role: 'system', text: system },
@@ -124,12 +123,188 @@ export class LunaAssistantService {
       1400,
       0.2
     );
+  }
 
-    return answer;
+  async explainSelection(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) throw new Error('Нет активного редактора.');
+
+    const doc = editor.document;
+    if (!isExplainSupported(doc)) {
+      throw new Error('Explain поддерживается только для файлов .fa и .cpp/.h/.hpp.');
+    }
+
+    const sel = editor.selection;
+    const selected = sel && !sel.isEmpty ? doc.getText(sel) : '';
+    if (!selected.trim()) throw new Error('Нужно выделить фрагмент кода для объяснения.');
+
+    const baseCfg = withDerivedDefaults(getAssistantConfig());
+    if (!baseCfg.enabled) throw new Error('Ассистент выключен. Включите luna.assistant.enabled.');
+
+    const apiKey = await getApiKeyFromSecrets(this.context);
+    if (!apiKey) throw new Error('API key не задан. Запустите команду “LuNA: Set Yandex API Key”.');
+
+    if (!baseCfg.generationModelUri) {
+      throw new Error('Не задан luna.assistant.generationModelUri. Пример: gpt://<folderId>/yandexgpt-lite/latest');
+    }
+
+    const code = clampTextByChars(selected, baseCfg.codeExplainMaxChars || 16000);
+
+    const filePath = vscode.workspace.asRelativePath(doc.uri, false);
+    const language = doc.languageId;
+    const rangeStr = `L${sel.start.line + 1}:${sel.start.character + 1}–L${sel.end.line + 1}:${sel.end.character + 1}`;
+
+    const system =
+      'Ты — ассистент разработчика. Объясняй код понятно и по делу. ' +
+      'Если видишь проблемы/ошибки — перечисли их отдельно. ' +
+      'Если можно улучшить — предложи конкретные варианты. ' +
+      'Если не хватает контекста — скажи, что именно нужно.';
+
+    const user =
+      `Задача: объясни выделенный фрагмент кода.\n` +
+      `Файл: ${filePath}\n` +
+      `Диапазон: ${rangeStr}\n` +
+      `Язык/тип: ${language}\n\n` +
+      `Код:\n` +
+      '```' +
+      guessFence(language, filePath) +
+      '\n' +
+      code +
+      '\n```';
+
+    const client = new YandexAiStudioClient({ apiKey, folderId: baseCfg.yandexFolderId || undefined });
+
+    const answer = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'LuNA: Explain selection', cancellable: true },
+      async (_progress, token) => {
+        const signal = abortSignalFromCancellationToken(token);
+        return await client.completion(
+          baseCfg.generationModelUri,
+          [
+            { role: 'system', text: system },
+            { role: 'user', text: user }
+          ],
+          1200,
+          0.2,
+          signal
+        );
+      }
+    );
+
+    this.getOutput().appendLine(`--- Explain Selection: ${filePath} (${rangeStr}) ---`);
+    this.getOutput().appendLine(answer.trim());
+    this.getOutput().appendLine('');
+    this.getOutput().show(true);
+  }
+
+  async explainFile(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) throw new Error('Нет активного редактора.');
+
+    const doc = editor.document;
+    if (!isExplainSupported(doc)) {
+      throw new Error('Explain поддерживается только для файлов .fa и .cpp/.h/.hpp.');
+    }
+
+    const baseCfg = withDerivedDefaults(getAssistantConfig());
+    if (!baseCfg.enabled) throw new Error('Ассистент выключен. Включите luna.assistant.enabled.');
+
+    const apiKey = await getApiKeyFromSecrets(this.context);
+    if (!apiKey) throw new Error('API key не задан. Запустите команду “LuNA: Set Yandex API Key”.');
+
+    if (!baseCfg.generationModelUri) {
+      throw new Error('Не задан luna.assistant.generationModelUri. Пример: gpt://<folderId>/yandexgpt-lite/latest');
+    }
+
+    const filePath = vscode.workspace.asRelativePath(doc.uri, false);
+    const language = doc.languageId;
+
+    const code = clampTextByChars(doc.getText(), baseCfg.codeExplainMaxChars || 16000);
+
+    const system =
+      'Ты — ассистент разработчика. Объясни файл: назначение, структура, важные функции/классы, ' +
+      'как это работает, типичные ошибки и места для улучшений. ' +
+      'Если файл слишком большой и обрезан — скажи, чего не хватает.';
+
+    const user =
+      `Задача: объясни файл целиком.\n` +
+      `Файл: ${filePath}\n` +
+      `Язык/тип: ${language}\n\n` +
+      `Код:\n` +
+      '```' +
+      guessFence(language, filePath) +
+      '\n' +
+      code +
+      '\n```';
+
+    const client = new YandexAiStudioClient({ apiKey, folderId: baseCfg.yandexFolderId || undefined });
+
+    const answer = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'LuNA: Explain file', cancellable: true },
+      async (_progress, token) => {
+        const signal = abortSignalFromCancellationToken(token);
+        return await client.completion(
+          baseCfg.generationModelUri,
+          [
+            { role: 'system', text: system },
+            { role: 'user', text: user }
+          ],
+          1400,
+          0.2,
+          signal
+        );
+      }
+    );
+
+    this.getOutput().appendLine(`--- Explain File: ${filePath} ---`);
+    this.getOutput().appendLine(answer.trim());
+    this.getOutput().appendLine('');
+    this.getOutput().show(true);
+  }
+
+  private getOutput(): vscode.OutputChannel {
+    if (!this.output) {
+      this.output = vscode.window.createOutputChannel('LuNA Assistant');
+    }
+    return this.output;
   }
 }
 
 function getWorkspaceRoot(): string | undefined {
-  const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  return ws;
+  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+}
+
+function isExplainSupported(doc: vscode.TextDocument): boolean {
+  const fsPath = doc.uri.fsPath.toLowerCase();
+  if (fsPath.endsWith('.fa')) return true;
+  if (fsPath.endsWith('.cpp') || fsPath.endsWith('.cc') || fsPath.endsWith('.cxx')) return true;
+  if (fsPath.endsWith('.h') || fsPath.endsWith('.hpp') || fsPath.endsWith('.hh')) return true;
+  return false;
+}
+
+function clampTextByChars(s: string, maxChars: number): string {
+  if (s.length <= maxChars) return s;
+  return s.slice(0, maxChars) + `\n\n/* …TRUNCATED: original length ${s.length} chars, limit ${maxChars}… */`;
+}
+
+function guessFence(languageId: string, filePath: string): string {
+  const fp = filePath.toLowerCase();
+  if (fp.endsWith('.fa')) return 'luna';
+  if (languageId.includes('cpp') || fp.endsWith('.cpp') || fp.endsWith('.hpp') || fp.endsWith('.h')) return 'cpp';
+  return '';
+}
+
+/**
+ * Convert VS Code CancellationToken -> AbortSignal (for fetch()).
+ * Works on Node 18+ (VS Code extension host).
+ */
+function abortSignalFromCancellationToken(token: vscode.CancellationToken): AbortSignal | undefined {
+  if (!token) return undefined;
+  const ac = new AbortController();
+  if (token.isCancellationRequested) {
+    ac.abort();
+    return ac.signal;
+  }
+  token.onCancellationRequested(() => ac.abort());
+  return ac.signal;
 }

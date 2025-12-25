@@ -47,7 +47,8 @@ function getAssistantConfig() {
         queryEmbeddingModelUri: cfg.get('assistant.queryEmbeddingModelUri', ''),
         generationModelUri: cfg.get('assistant.generationModelUri', ''),
         topK: clamp(cfg.get('assistant.topK', 5), 1, 20),
-        chunkChars: clamp(cfg.get('assistant.chunkChars', 1800), 300, 8000)
+        chunkChars: clamp(cfg.get('assistant.chunkChars', 1800), 300, 8000),
+        codeExplainMaxChars: clamp(cfg.get('assistant.codeExplain.maxChars', 16000), 2000, 200000)
     };
 }
 function clamp(n, lo, hi) {

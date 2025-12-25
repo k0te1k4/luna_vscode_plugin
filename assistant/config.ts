@@ -10,6 +10,7 @@ export type AssistantConfig = {
   generationModelUri: string;
   topK: number;
   chunkChars: number;
+  codeExplainMaxChars: number;
 };
 
 export function getAssistantConfig(): AssistantConfig {
@@ -23,7 +24,8 @@ export function getAssistantConfig(): AssistantConfig {
     queryEmbeddingModelUri: cfg.get<string>('assistant.queryEmbeddingModelUri', ''),
     generationModelUri: cfg.get<string>('assistant.generationModelUri', ''),
     topK: clamp(cfg.get<number>('assistant.topK', 5), 1, 20),
-    chunkChars: clamp(cfg.get<number>('assistant.chunkChars', 1800), 300, 8000)
+    chunkChars: clamp(cfg.get<number>('assistant.chunkChars', 1800), 300, 8000),
+    codeExplainMaxChars: clamp(cfg.get<number>('assistant.codeExplain.maxChars', 16000), 2000, 200000)
   };
 }
 

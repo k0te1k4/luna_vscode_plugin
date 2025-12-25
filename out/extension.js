@@ -71,11 +71,63 @@ function activate(context) {
         onAsk: async (q) => assistant.ask(q),
         onReindex: async () => assistant.reindexWiki()
     });
-    context.subscriptions.push(vscode.commands.registerCommand('luna.assistant.open', () => panel.show()), vscode.commands.registerCommand('luna.assistant.reindexWiki', () => assistant.reindexWiki()), vscode.commands.registerCommand('luna.assistant.toggle', async () => {
-        await assistant.toggleEnabled();
-        const enabled = await assistant.isEnabled();
-        vscode.window.showInformationMessage(`LuNA AI Assistant: ${enabled ? 'enabled' : 'disabled'}.`);
-    }), vscode.commands.registerCommand('luna.assistant.setApiKey', () => assistant.setApiKeyInteractively()));
+    // --- Commands (MUST match package.json exactly) ---
+    context.subscriptions.push(vscode.commands.registerCommand('luna.assistant.open', async () => {
+        var _a;
+        try {
+            panel.show();
+        }
+        catch (err) {
+            vscode.window.showErrorMessage((_a = err === null || err === void 0 ? void 0 : err.message) !== null && _a !== void 0 ? _a : String(err));
+        }
+    }), vscode.commands.registerCommand('luna.assistant.reindexWiki', async () => {
+        var _a;
+        try {
+            await assistant.reindexWiki();
+        }
+        catch (err) {
+            vscode.window.showErrorMessage((_a = err === null || err === void 0 ? void 0 : err.message) !== null && _a !== void 0 ? _a : String(err));
+        }
+    }), vscode.commands.registerCommand('luna.assistant.toggle', async () => {
+        var _a;
+        try {
+            await assistant.toggleEnabled();
+            const enabled = await assistant.isEnabled();
+            vscode.window.showInformationMessage(`LuNA AI Assistant: ${enabled ? 'enabled' : 'disabled'}.`);
+        }
+        catch (err) {
+            vscode.window.showErrorMessage((_a = err === null || err === void 0 ? void 0 : err.message) !== null && _a !== void 0 ? _a : String(err));
+        }
+    }), vscode.commands.registerCommand('luna.assistant.setApiKey', async () => {
+        var _a;
+        try {
+            await assistant.setApiKeyInteractively();
+        }
+        catch (err) {
+            vscode.window.showErrorMessage((_a = err === null || err === void 0 ? void 0 : err.message) !== null && _a !== void 0 ? _a : String(err));
+        }
+    }), 
+    // NEW: explain selection
+    vscode.commands.registerCommand('luna.assistant.explainSelection', async () => {
+        var _a;
+        try {
+            await assistant.explainSelection();
+        }
+        catch (err) {
+            vscode.window.showErrorMessage((_a = err === null || err === void 0 ? void 0 : err.message) !== null && _a !== void 0 ? _a : String(err));
+        }
+    }), 
+    // NEW: explain whole file
+    vscode.commands.registerCommand('luna.assistant.explainFile', async () => {
+        var _a;
+        try {
+            await assistant.explainFile();
+        }
+        catch (err) {
+            vscode.window.showErrorMessage((_a = err === null || err === void 0 ? void 0 : err.message) !== null && _a !== void 0 ? _a : String(err));
+        }
+    }));
+    // --- Status bar ---
     const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     status.command = 'luna.assistant.open';
     status.tooltip = 'LuNA AI Assistant (Wiki RAG)';
@@ -83,8 +135,13 @@ function activate(context) {
     status.show();
     context.subscriptions.push(status);
     const updateStatus = async () => {
-        const enabled = await assistant.isEnabled();
-        status.text = enabled ? 'LuNA AI: on' : 'LuNA AI: off';
+        try {
+            const enabled = await assistant.isEnabled();
+            status.text = enabled ? 'LuNA AI: on' : 'LuNA AI: off';
+        }
+        catch (_a) {
+            status.text = 'LuNA AI: ?';
+        }
     };
     updateStatus();
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e => {
@@ -92,13 +149,13 @@ function activate(context) {
             updateStatus();
         }
     }));
-    // Общий провайдер автодополнения для .fa и ucodes.cpp
+    // --- Completion provider for .fa and ucodes.cpp ---
     const selector = [
         { scheme: 'file', language: 'luna' },
         { scheme: 'file', language: 'cpp', pattern: '**/ucodes.cpp' }
     ];
     const completionProvider = vscode.languages.registerCompletionItemProvider(selector, {
-        provideCompletionItems(document, position) {
+        provideCompletionItems() {
             const keywordItems = LUNA_KEYWORDS.map(kw => {
                 const item = new vscode.CompletionItem(kw, vscode.CompletionItemKind.Keyword);
                 item.insertText = kw;
@@ -114,16 +171,20 @@ function activate(context) {
         }
     });
     context.subscriptions.push(completionProvider);
-    // LSP-клиент для LuNA (.fa)
+    // --- LSP client for LuNA (.fa) ---
     const serverModule = context.asAbsolutePath(path.join('server', 'server.js'));
     const serverOptions = {
         run: { module: serverModule, transport: node_1.TransportKind.ipc },
-        debug: { module: serverModule, transport: node_1.TransportKind.ipc, options: { execArgv: ['--nolazy', '--inspect=6009'] } }
+        debug: {
+            module: serverModule,
+            transport: node_1.TransportKind.ipc,
+            options: { execArgv: ['--nolazy', '--inspect=6009'] }
+        }
     };
     const clientOptions = {
         documentSelector: [
             { scheme: 'file', language: 'luna' },
-            { scheme: 'file', language: 'cpp' } // ← добавили поддержку C++ (ucodes.cpp)
+            { scheme: 'file', language: 'cpp' } // если у тебя LSP реально понимает cpp — ок; иначе можно убрать
         ],
         synchronize: {
             fileEvents: vscode.workspace.createFileSystemWatcher('**/*.{fa,cpp}')
@@ -131,7 +192,7 @@ function activate(context) {
     };
     client = new node_1.LanguageClient('lunaLanguageServer', 'LuNA Language Server', serverOptions, clientOptions);
     client.start();
-    // Предложение создать ucodes.cpp, если его нет рядом с .fa
+    // --- Suggest ucodes.cpp near .fa ---
     const faWatcher = vscode.workspace.createFileSystemWatcher('**/*.fa');
     faWatcher.onDidCreate(uri => checkOrSuggestUcodes(uri));
     faWatcher.onDidChange(uri => checkOrSuggestUcodes(uri));
@@ -162,9 +223,8 @@ async function checkOrSuggestUcodes(faUri) {
     }
 }
 function deactivate() {
-    if (!client) {
+    if (!client)
         return undefined;
-    }
     return client.stop();
 }
 //# sourceMappingURL=extension.js.map

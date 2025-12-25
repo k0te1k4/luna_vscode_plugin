@@ -6,16 +6,21 @@ exports.setApiKeyInSecrets = setApiKeyInSecrets;
 class YandexAiStudioClient {
     constructor(opts) {
         this.apiKey = opts.apiKey;
+        this.folderId = opts.folderId;
     }
     async postJson(url, body, signal) {
+        const headers = {
+            'Content-Type': 'application/json',
+            // Yandex Cloud AI Studio auth
+            Authorization: `Api-Key ${this.apiKey}`
+        };
+        // For many YC AI endpoints, x-folder-id is either required or helps routing.
+        // Safe to send when folderId is known.
+        if (this.folderId)
+            headers['x-folder-id'] = this.folderId;
         const res = await fetch(url, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                // AI Studio auth: Authorization: Api-Key <API_key>
-                // https://yandex.cloud/en/docs/ai-studio/api-ref/authentication
-                Authorization: `Api-Key ${this.apiKey}`
-            },
+            headers,
             body: JSON.stringify(body),
             signal
         });
@@ -27,32 +32,61 @@ class YandexAiStudioClient {
     }
     /**
      * Embeddings API: POST https://llm.api.cloud.yandex.net/foundationModels/v1/textEmbedding
+     * modelUri example: emb://<folderId>/text-search-doc/latest
      */
     async embedText(modelUri, text, signal) {
         const r = await this.postJson('https://llm.api.cloud.yandex.net/foundationModels/v1/textEmbedding', { modelUri, text }, signal);
-        // API doc says "string" but actual values are numeric; normalize.
         return r.embedding.map(v => (typeof v === 'string' ? Number(v) : v));
     }
     /**
-     * Text generation API (sync): POST https://llm.api.cloud.yandex.net/foundationModels/v1/completion
+     * Chat Completions API (OpenAI-compatible):
+     * POST https://llm.api.cloud.yandex.net/v1/chat/completions
+     *
+     * model should be like: gpt://<folderId>/<modelId>/latest
      */
-    async completion(modelUri, messages, maxTokens = 1024, temperature = 0.2, signal) {
-        var _a, _b, _c, _d;
-        const r = await this.postJson('https://llm.api.cloud.yandex.net/foundationModels/v1/completion', {
-            modelUri,
-            completionOptions: {
-                stream: false,
-                temperature,
-                maxTokens: String(maxTokens)
-            },
-            messages
+    async completion(model, messages, maxTokens = 1024, temperature = 0.2, signal) {
+        var _a, _b, _c;
+        const resolvedModel = this.resolveChatModel(model);
+        const chatMessages = messages.map(m => ({
+            role: m.role,
+            content: m.text
+        }));
+        const r = await this.postJson('https://llm.api.cloud.yandex.net/v1/chat/completions', {
+            model: resolvedModel,
+            temperature,
+            max_tokens: maxTokens,
+            messages: chatMessages
         }, signal);
-        // Response format: result.alternatives[0].message.text is common.
-        const text = (_d = (_c = (_b = (_a = r === null || r === void 0 ? void 0 : r.result) === null || _a === void 0 ? void 0 : _a.alternatives) === null || _b === void 0 ? void 0 : _b[0]) === null || _c === void 0 ? void 0 : _c.message) === null || _d === void 0 ? void 0 : _d.text;
+        const text = (_c = (_b = (_a = r === null || r === void 0 ? void 0 : r.choices) === null || _a === void 0 ? void 0 : _a[0]) === null || _b === void 0 ? void 0 : _b.message) === null || _c === void 0 ? void 0 : _c.content;
         if (!text) {
-            throw new Error(`Unexpected completion response shape: ${JSON.stringify(r).slice(0, 500)}`);
+            throw new Error(`Unexpected chat.completions response shape: ${JSON.stringify(r).slice(0, 700)}`);
         }
         return text;
+    }
+    /**
+     * Accepts:
+     *  - full "gpt://<folderId>/<modelId>/latest"
+     *  - or "<modelId>" (if folderId exists): "yandexgpt" / "yandexgpt-lite"
+     */
+    resolveChatModel(model) {
+        var _a, _b;
+        const m = (model || '').trim();
+        if (!m)
+            throw new Error('generationModelUri/model is empty');
+        // Common misconfigs:
+        if (m.startsWith('emb://')) {
+            throw new Error(`Invalid generation model "${m}". It looks like embeddings modelUri (emb://...). ` +
+                `For chat use: gpt://<folderId>/<modelId>/latest (e.g. gpt://${(_a = this.folderId) !== null && _a !== void 0 ? _a : '<folderId>'}/yandexgpt-lite/latest)`);
+        }
+        if (m.startsWith('http://') || m.startsWith('https://')) {
+            throw new Error(`Invalid generation model "${m}". Do not pass URL here. ` +
+                `Use: gpt://<folderId>/<modelId>/latest (e.g. gpt://${(_b = this.folderId) !== null && _b !== void 0 ? _b : '<folderId>'}/yandexgpt-lite/latest)`);
+        }
+        if (m.startsWith('gpt://'))
+            return m;
+        if (this.folderId)
+            return `gpt://${this.folderId}/${m}/latest`;
+        throw new Error(`Invalid chat model: "${model}". Expected "gpt://<folderId>/<modelId>/latest" or provide folderId.`);
     }
 }
 exports.YandexAiStudioClient = YandexAiStudioClient;
@@ -64,9 +98,6 @@ async function safeReadText(res) {
         return '<no-body>';
     }
 }
-/**
- * Helper: stored under a stable secret key name.
- */
 async function getApiKeyFromSecrets(context) {
     return await context.secrets.get('luna.assistant.yandexApiKey');
 }

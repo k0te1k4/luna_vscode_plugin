@@ -1,4 +1,3 @@
-
 import * as vscode from 'vscode';
 import * as path from 'path';
 import {
@@ -41,22 +40,68 @@ const LUNA_SNIPPETS: { label: string; insertText: vscode.SnippetString; document
 
 export function activate(context: vscode.ExtensionContext) {
   const assistant = new LunaAssistantService(context);
+
   const panel = new AssistantPanel(context, {
     onAsk: async (q) => assistant.ask(q),
     onReindex: async () => assistant.reindexWiki()
   });
 
+  // --- Commands (MUST match package.json exactly) ---
   context.subscriptions.push(
-    vscode.commands.registerCommand('luna.assistant.open', () => panel.show()),
-    vscode.commands.registerCommand('luna.assistant.reindexWiki', () => assistant.reindexWiki()),
-    vscode.commands.registerCommand('luna.assistant.toggle', async () => {
-      await assistant.toggleEnabled();
-      const enabled = await assistant.isEnabled();
-      vscode.window.showInformationMessage(`LuNA AI Assistant: ${enabled ? 'enabled' : 'disabled'}.`);
+    vscode.commands.registerCommand('luna.assistant.open', async () => {
+      try {
+        panel.show();
+      } catch (err: any) {
+        vscode.window.showErrorMessage(err?.message ?? String(err));
+      }
     }),
-    vscode.commands.registerCommand('luna.assistant.setApiKey', () => assistant.setApiKeyInteractively())
+
+    vscode.commands.registerCommand('luna.assistant.reindexWiki', async () => {
+      try {
+        await assistant.reindexWiki();
+      } catch (err: any) {
+        vscode.window.showErrorMessage(err?.message ?? String(err));
+      }
+    }),
+
+    vscode.commands.registerCommand('luna.assistant.toggle', async () => {
+      try {
+        await assistant.toggleEnabled();
+        const enabled = await assistant.isEnabled();
+        vscode.window.showInformationMessage(`LuNA AI Assistant: ${enabled ? 'enabled' : 'disabled'}.`);
+      } catch (err: any) {
+        vscode.window.showErrorMessage(err?.message ?? String(err));
+      }
+    }),
+
+    vscode.commands.registerCommand('luna.assistant.setApiKey', async () => {
+      try {
+        await assistant.setApiKeyInteractively();
+      } catch (err: any) {
+        vscode.window.showErrorMessage(err?.message ?? String(err));
+      }
+    }),
+
+    // NEW: explain selection
+    vscode.commands.registerCommand('luna.assistant.explainSelection', async () => {
+      try {
+        await assistant.explainSelection();
+      } catch (err: any) {
+        vscode.window.showErrorMessage(err?.message ?? String(err));
+      }
+    }),
+
+    // NEW: explain whole file
+    vscode.commands.registerCommand('luna.assistant.explainFile', async () => {
+      try {
+        await assistant.explainFile();
+      } catch (err: any) {
+        vscode.window.showErrorMessage(err?.message ?? String(err));
+      }
+    })
   );
 
+  // --- Status bar ---
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   status.command = 'luna.assistant.open';
   status.tooltip = 'LuNA AI Assistant (Wiki RAG)';
@@ -65,17 +110,24 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(status);
 
   const updateStatus = async () => {
-    const enabled = await assistant.isEnabled();
-    status.text = enabled ? 'LuNA AI: on' : 'LuNA AI: off';
-  };
-  updateStatus();
-  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e => {
-    if (e.affectsConfiguration('luna.assistant.enabled')) {
-      updateStatus();
+    try {
+      const enabled = await assistant.isEnabled();
+      status.text = enabled ? 'LuNA AI: on' : 'LuNA AI: off';
+    } catch {
+      status.text = 'LuNA AI: ?';
     }
-  }));
+  };
 
-  // Общий провайдер автодополнения для .fa и ucodes.cpp
+  updateStatus();
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration(e => {
+      if (e.affectsConfiguration('luna.assistant.enabled')) {
+        updateStatus();
+      }
+    })
+  );
+
+  // --- Completion provider for .fa and ucodes.cpp ---
   const selector: vscode.DocumentSelector = [
     { scheme: 'file', language: 'luna' },
     { scheme: 'file', language: 'cpp', pattern: '**/ucodes.cpp' }
@@ -84,7 +136,7 @@ export function activate(context: vscode.ExtensionContext) {
   const completionProvider = vscode.languages.registerCompletionItemProvider(
     selector,
     {
-      provideCompletionItems(document, position) {
+      provideCompletionItems() {
         const keywordItems = LUNA_KEYWORDS.map(kw => {
           const item = new vscode.CompletionItem(kw, vscode.CompletionItemKind.Keyword);
           item.insertText = kw;
@@ -105,28 +157,31 @@ export function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(completionProvider);
 
-  // LSP-клиент для LuNA (.fa)
+  // --- LSP client for LuNA (.fa) ---
   const serverModule = context.asAbsolutePath(path.join('server', 'server.js'));
   const serverOptions: ServerOptions = {
     run: { module: serverModule, transport: TransportKind.ipc },
-    debug: { module: serverModule, transport: TransportKind.ipc, options: { execArgv: ['--nolazy', '--inspect=6009'] } }
+    debug: {
+      module: serverModule,
+      transport: TransportKind.ipc,
+      options: { execArgv: ['--nolazy', '--inspect=6009'] }
+    }
   };
 
   const clientOptions: LanguageClientOptions = {
     documentSelector: [
       { scheme: 'file', language: 'luna' },
-      { scheme: 'file', language: 'cpp' }   // ← добавили поддержку C++ (ucodes.cpp)
+      { scheme: 'file', language: 'cpp' } // если у тебя LSP реально понимает cpp — ок; иначе можно убрать
     ],
     synchronize: {
       fileEvents: vscode.workspace.createFileSystemWatcher('**/*.{fa,cpp}')
     }
   };
 
-
   client = new LanguageClient('lunaLanguageServer', 'LuNA Language Server', serverOptions, clientOptions);
   client.start();
 
-  // Предложение создать ucodes.cpp, если его нет рядом с .fa
+  // --- Suggest ucodes.cpp near .fa ---
   const faWatcher = vscode.workspace.createFileSystemWatcher('**/*.fa');
   faWatcher.onDidCreate(uri => checkOrSuggestUcodes(uri));
   faWatcher.onDidChange(uri => checkOrSuggestUcodes(uri));
@@ -163,8 +218,6 @@ async function checkOrSuggestUcodes(faUri: vscode.Uri) {
 }
 
 export function deactivate(): Thenable<void> | undefined {
-  if (!client) {
-    return undefined;
-  }
+  if (!client) return undefined;
   return client.stop();
 }

@@ -45,7 +45,7 @@ class AssistantPanel {
             this.panel.reveal(vscode.ViewColumn.Beside);
             return;
         }
-        this.panel = vscode.window.createWebviewPanel('lunaAssistant', 'LuNA AI Assistant (Wiki RAG)', vscode.ViewColumn.Beside, {
+        this.panel = vscode.window.createWebviewPanel('lunaAssistant', 'LuNA AI Assistant (Knowledge Base RAG)', vscode.ViewColumn.Beside, {
             enableScripts: true,
             retainContextWhenHidden: true
         });
@@ -66,7 +66,7 @@ class AssistantPanel {
                 }
                 else if ((msg === null || msg === void 0 ? void 0 : msg.type) === 'reindex') {
                     await this.cb.onReindex();
-                    webview.postMessage({ type: 'system', text: '✅ Индекс wiki обновлён.' });
+                    webview.postMessage({ type: 'system', text: '✅ Индекс базы знаний обновлён.' });
                 }
             }
             catch (e) {
@@ -99,12 +99,12 @@ function getHtml() {
 </head>
 <body>
   <header>
-    <h1>LuNA AI Assistant (RAG по wiki)</h1>
-    <button id="reindex">Reindex wiki</button>
+    <h1>LuNA AI Assistant (RAG по базе знаний)</h1>
+    <button id="reindex">Reindex knowledge base</button>
   </header>
   <div id="log"></div>
   <footer>
-    <input id="q" placeholder="Спросите по LuNA wiki…" />
+    <input id="q" placeholder="Спросите по документации LuNA…" />
     <button id="ask">Ask</button>
   </footer>
   <script>
@@ -133,7 +133,7 @@ function getHtml() {
     btn.addEventListener('click', ask);
     q.addEventListener('keydown', (e) => { if (e.key === 'Enter') ask(); });
     reindex.addEventListener('click', () => {
-      add('⏳ Перестраиваю индекс wiki…');
+      add('⏳ Перестраиваю индекс базы знаний…');
       vscode.postMessage({ type: 'reindex' });
     });
 

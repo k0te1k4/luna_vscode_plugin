@@ -2,7 +2,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { YandexAiStudioClient } from './yandexClient';
-import { IndexFile, IndexedChunk, saveIndex } from './vectorIndex';
+import { IndexFile, IndexedChunk, loadIndex, saveIndex } from './vectorIndex';
 
 type ChunkPlan = {
   sourcePath: string; // relative to wiki root
@@ -19,6 +19,15 @@ export async function buildWikiIndex(params: {
   cancellationToken?: vscode.CancellationToken;
   progress?: vscode.Progress<{ message?: string; increment?: number }>;
 }): Promise<IndexFile> {
+  // Reuse embeddings from an existing index when possible to reduce API calls.
+  const prev = await loadIndex(params.indexAbsPath);
+  const prevMap = new Map<string, IndexedChunk>();
+  if (prev && prev.modelUri === params.docEmbeddingModelUri && prev.chunkChars === params.chunkChars) {
+    for (const c of prev.chunks) {
+      prevMap.set(makeChunkKey(c.sourcePath, c.heading, c.text), c);
+    }
+  }
+
   const mdFiles = await collectMarkdownFiles(params.wikiRootAbs);
   const plans: ChunkPlan[] = [];
 
@@ -39,8 +48,12 @@ export async function buildWikiIndex(params: {
     }
     params.progress?.report({ message: `Embedding: ${plan.sourcePath}`, increment: (1 / Math.max(1, total)) * 100 });
 
-    const embedding = await params.client.embedText(params.docEmbeddingModelUri, plan.text);
-    const id = `${plan.sourcePath}::${hashForId(plan.heading ?? '')}::${hashForId(plan.text.slice(0, 256))}`;
+    const key = makeChunkKey(plan.sourcePath, plan.heading, plan.text);
+    const reused = prevMap.get(key);
+    const embedding = reused?.embedding ?? (await params.client.embedText(params.docEmbeddingModelUri, plan.text));
+
+    // Use full-text hash in id so edits invalidate the chunk.
+    const id = `${plan.sourcePath}::${hashForId(plan.heading ?? '')}::${hashForId(plan.text)}`;
     chunks.push({ id, sourcePath: plan.sourcePath, heading: plan.heading, text: plan.text, embedding });
     done++;
   }
@@ -57,6 +70,11 @@ export async function buildWikiIndex(params: {
   return idx;
 }
 
+function makeChunkKey(sourcePath: string, heading: string | null, text: string): string {
+  // Used only for reuse. Keep stable and based on content.
+  return `${sourcePath}::${heading ?? ''}::${hashForId(text)}`;
+}
+
 async function collectMarkdownFiles(root: string): Promise<string[]> {
   const out: string[] = [];
   async function walk(dir: string) {
@@ -68,7 +86,7 @@ async function collectMarkdownFiles(root: string): Promise<string[]> {
         await walk(abs);
       } else if (e.isFile()) {
         const low = e.name.toLowerCase();
-        if (low.endsWith('.md') || low.endsWith('.markdown')) out.push(abs);
+        if (low.endsWith('.md') || low.endsWith('.markdown') || low.endsWith('.txt')) out.push(abs);
       }
     }
   }

@@ -38,7 +38,15 @@ const fs = __importStar(require("fs/promises"));
 const path = __importStar(require("path"));
 const vectorIndex_1 = require("./vectorIndex");
 async function buildWikiIndex(params) {
-    var _a, _b, _c;
+    var _a, _b, _c, _d;
+    // Reuse embeddings from an existing index when possible to reduce API calls.
+    const prev = await (0, vectorIndex_1.loadIndex)(params.indexAbsPath);
+    const prevMap = new Map();
+    if (prev && prev.modelUri === params.docEmbeddingModelUri && prev.chunkChars === params.chunkChars) {
+        for (const c of prev.chunks) {
+            prevMap.set(makeChunkKey(c.sourcePath, c.heading, c.text), c);
+        }
+    }
     const mdFiles = await collectMarkdownFiles(params.wikiRootAbs);
     const plans = [];
     for (const abs of mdFiles) {
@@ -55,8 +63,11 @@ async function buildWikiIndex(params) {
             throw new Error('Indexing cancelled');
         }
         (_b = params.progress) === null || _b === void 0 ? void 0 : _b.report({ message: `Embedding: ${plan.sourcePath}`, increment: (1 / Math.max(1, total)) * 100 });
-        const embedding = await params.client.embedText(params.docEmbeddingModelUri, plan.text);
-        const id = `${plan.sourcePath}::${hashForId((_c = plan.heading) !== null && _c !== void 0 ? _c : '')}::${hashForId(plan.text.slice(0, 256))}`;
+        const key = makeChunkKey(plan.sourcePath, plan.heading, plan.text);
+        const reused = prevMap.get(key);
+        const embedding = (_c = reused === null || reused === void 0 ? void 0 : reused.embedding) !== null && _c !== void 0 ? _c : (await params.client.embedText(params.docEmbeddingModelUri, plan.text));
+        // Use full-text hash in id so edits invalidate the chunk.
+        const id = `${plan.sourcePath}::${hashForId((_d = plan.heading) !== null && _d !== void 0 ? _d : '')}::${hashForId(plan.text)}`;
         chunks.push({ id, sourcePath: plan.sourcePath, heading: plan.heading, text: plan.text, embedding });
         done++;
     }
@@ -69,6 +80,10 @@ async function buildWikiIndex(params) {
     };
     await (0, vectorIndex_1.saveIndex)(params.indexAbsPath, idx);
     return idx;
+}
+function makeChunkKey(sourcePath, heading, text) {
+    // Used only for reuse. Keep stable and based on content.
+    return `${sourcePath}::${heading !== null && heading !== void 0 ? heading : ''}::${hashForId(text)}`;
 }
 async function collectMarkdownFiles(root) {
     const out = [];
@@ -83,7 +98,7 @@ async function collectMarkdownFiles(root) {
             }
             else if (e.isFile()) {
                 const low = e.name.toLowerCase();
-                if (low.endsWith('.md') || low.endsWith('.markdown'))
+                if (low.endsWith('.md') || low.endsWith('.markdown') || low.endsWith('.txt'))
                     out.push(abs);
             }
         }

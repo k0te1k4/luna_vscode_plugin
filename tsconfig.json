@@ -16,6 +16,7 @@
   },
   "include": [
     "extension.ts",
-    "**/*.ts"
+    "**/*.ts",
+    "**/*.d.ts"
   ]
 }

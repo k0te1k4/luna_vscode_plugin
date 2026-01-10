@@ -17,18 +17,19 @@
    * также подключён к `.cpp` (чтобы не ругаться на `ucodes.cpp` рядом).
 4. **Подсказка создать `ucodes.cpp`**, если вы создали/изменили `.fa`, а `ucodes.cpp` рядом отсутствует.
 
-### Опционально: LuNA AI Assistant (RAG по wiki)
+### Опционально: LuNA AI Assistant (RAG по базе знаний)
 
 Если включить опцию `luna.assistant.enabled`, расширение получает простого **AI-ассистента**, который:
 
-* строит локальный индекс по **LuNA wiki** (Markdown-файлы в git submodule)
-* отвечает на вопросы, опираясь на найденные фрагменты wiki (RAG)
+* синхронизирует **LuNA базу знаний** из Yandex Object Storage
+* строит локальный индекс по скачанным документам (Markdown/TXT)
+* отвечает на вопросы, опираясь на найденные фрагменты (RAG)
 
 Ассистент **не обязателен**: если он выключен, остальной функционал работает как обычно.
 
 > Текущая реализация делает RAG локально:
 > * эмбеддинги и генерация — через Yandex AI Studio API
-> * сам индекс (векторы + тексты) хранится в workspace (`.luna/assistant/index.json`)
+> * сам индекс хранится в globalStorage расширения (по умолчанию), отдельно на каждую версию документации
 
 ## Быстрый старт (без ассистента)
 
@@ -36,16 +37,19 @@
 2. Откройте проект с файлами `.fa`.
 3. Подсветка, автодополнение и LSP включатся автоматически.
 
-## Подключение LuNA wiki через git submodule (для ассистента)
+## Настройка облачной базы знаний (Yandex Object Storage)
 
-В корне вашего репозитория выполните:
-
-```bash
-git submodule add <URL_вашего_gitlab_репозитория_luna_wiki> luna.wiki
-git submodule update --init --recursive
-```
-
-По умолчанию расширение ожидает wiki по пути `luna.wiki` (настраивается).
+1. Создайте bucket в **Yandex Object Storage**.
+2. В настройках VS Code заполните:
+   * `luna.kb.storage.bucket`
+   * (опционально) `luna.kb.storage.basePrefix` (по умолчанию `luna-kb`)
+3. Выполните команду:
+   * **LuNA KB: Set Storage Credentials**
+   (Access Key ID + Secret Access Key сохраняются в Secret Storage VS Code).
+4. Откройте боковую панель **LuNA** → **Knowledge Base**:
+   * создавайте версии
+   * загружайте/удаляйте документы
+   * импортируйте PDF ВКР (заливается оригинал + текстовая md-версия, best-effort)
 
 ## Настройка Yandex AI Studio (для ассистента)
 
@@ -82,32 +86,33 @@ Authorization: Api-Key <API_key>
    * **LuNA: Set Yandex API Key**
    (ключ сохранится в Secret Storage VS Code)
 3. Выполните команду:
-   * **LuNA: Reindex Wiki for Assistant**
+   * **LuNA: Reindex Knowledge Base for Assistant**
 4. Откройте чат:
    * **LuNA: Open AI Assistant**
 
 ## Команды
 
 * `LuNA: Open AI Assistant` — открыть окно чата.
-* `LuNA: Reindex Wiki for Assistant` — пересобрать индекс wiki.
+* `LuNA: Reindex Knowledge Base for Assistant` — пересобрать индекс базы знаний.
 * `LuNA: Toggle AI Assistant` — включить/выключить ассистента в настройках workspace.
 * `LuNA: Set Yandex API Key` — сохранить API key в Secret Storage.
 
 ## Где хранится индекс
 
-По умолчанию: `.luna/assistant/index.json` в корне workspace.
+По умолчанию: в **globalStorage** расширения (не в проекте), отдельно на каждую версию документации.
 
 Файл содержит:
 
-* `chunks[]`: текстовые фрагменты wiki
+* `chunks[]`: текстовые фрагменты базы знаний
 * `embedding[]`: вектор эмбеддинга
 
-⚠️ Не добавляйте этот индекс в публичный репозиторий, если в wiki есть закрытая информация.
+⚠️ Не публикуйте этот индекс, если в базе знаний есть закрытая информация.
 
 ## Как работает RAG в расширении
 
-1. **Индексация** (`Reindex Wiki`)
-   * находит все `.md/.markdown` в папке wiki
+1. **Индексация** (`Reindex Knowledge Base`)
+   * синхронизирует документы из Object Storage
+   * находит все `.md/.markdown/.txt` в локальном кеше
    * режет по заголовкам `# ...` и по ~`chunkChars`
    * для каждого чанка вызывает Embeddings API (`/foundationModels/v1/textEmbedding`)
    * сохраняет в локальный JSON

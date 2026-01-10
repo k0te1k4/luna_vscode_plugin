@@ -33,43 +33,25 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getAssistantConfig = getAssistantConfig;
-exports.withDerivedDefaults = withDerivedDefaults;
+exports.getKbConfig = getKbConfig;
+exports.normalizePrefix = normalizePrefix;
 const vscode = __importStar(require("vscode"));
-function getAssistantConfig() {
+function getKbConfig() {
     const cfg = vscode.workspace.getConfiguration('luna');
     return {
-        enabled: cfg.get('assistant.enabled', false),
-        indexStorageScope: cfg.get('assistant.indexStorageScope', 'global'),
-        indexStoragePath: cfg.get('assistant.indexStoragePath', 'assistant/index.json'),
-        yandexFolderId: cfg.get('assistant.yandexFolderId', ''),
-        docEmbeddingModelUri: cfg.get('assistant.docEmbeddingModelUri', ''),
-        queryEmbeddingModelUri: cfg.get('assistant.queryEmbeddingModelUri', ''),
-        generationModelUri: cfg.get('assistant.generationModelUri', ''),
-        topK: clamp(cfg.get('assistant.topK', 5), 1, 20),
-        chunkChars: clamp(cfg.get('assistant.chunkChars', 1800), 300, 8000),
-        codeExplainMaxChars: clamp(cfg.get('assistant.codeExplain.maxChars', 16000), 2000, 200000)
+        enabled: cfg.get('kb.enabled', true),
+        bucket: cfg.get('kb.storage.bucket', ''),
+        endpoint: cfg.get('kb.storage.endpoint', 'https://storage.yandexcloud.net'),
+        region: cfg.get('kb.storage.region', 'ru-central1'),
+        basePrefix: normalizePrefix(cfg.get('kb.storage.basePrefix', 'luna-kb')),
+        defaultVersion: cfg.get('kb.defaultVersion', 'luna7'),
+        knownVersions: (cfg.get('kb.knownVersions', []) || []).filter(Boolean)
     };
 }
-function clamp(n, lo, hi) {
-    if (Number.isNaN(n))
-        return lo;
-    return Math.max(lo, Math.min(hi, n));
-}
-/**
- * If user didn't fill explicit model URIs but did fill folderId, we can derive defaults.
- *
- * Per Yandex AI Studio docs:
- *  - emb://<folder_ID>/text-search-doc/latest
- *  - emb://<folder_ID>/text-search-query/latest
- */
-function withDerivedDefaults(cfg) {
-    if (!cfg.yandexFolderId)
-        return cfg;
-    return {
-        ...cfg,
-        docEmbeddingModelUri: cfg.docEmbeddingModelUri || `emb://${cfg.yandexFolderId}/text-search-doc/latest`,
-        queryEmbeddingModelUri: cfg.queryEmbeddingModelUri || `emb://${cfg.yandexFolderId}/text-search-query/latest`
-    };
+function normalizePrefix(p) {
+    const s = String(p || '').trim();
+    if (!s)
+        return '';
+    return s.replace(/^\/+/, '').replace(/\/+$/, '');
 }
 //# sourceMappingURL=config.js.map

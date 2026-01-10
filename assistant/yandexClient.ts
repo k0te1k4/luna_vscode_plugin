@@ -26,9 +26,63 @@ export class YandexAiStudioClient {
   private readonly apiKey: string;
   private readonly folderId?: string;
 
+  // ---- Known YC AI Studio rate limits ----
+  // Embeddings are commonly limited to 10 req/s. Keep a safety margin.
+  // If you hit 429, reduce embedMaxRps / embedMaxConcurrency.
+  private readonly embedMaxRps = 8;
+  private readonly embedMaxConcurrency = 2;
+
+  // Simple in-process scheduler to enforce RPS + concurrency.
+  private embedQueue: Array<{
+    run: () => Promise<any>;
+    resolve: (v: any) => void;
+    reject: (e: any) => void;
+  }> = [];
+  private embedInFlight = 0;
+  private embedNextAllowedAt = 0;
+
   constructor(opts: YandexClientOptions) {
     this.apiKey = opts.apiKey;
     this.folderId = opts.folderId;
+  }
+
+  private scheduleEmbedding<T>(fn: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      this.embedQueue.push({ run: fn, resolve, reject });
+      void this.pumpEmbedQueue();
+    });
+  }
+
+  private async pumpEmbedQueue(): Promise<void> {
+    // Avoid concurrent pumps spinning.
+    if (this.embedInFlight >= this.embedMaxConcurrency) return;
+    if (this.embedQueue.length === 0) return;
+
+    const now = Date.now();
+    const minIntervalMs = Math.ceil(1000 / Math.max(1, this.embedMaxRps));
+    const waitMs = Math.max(0, this.embedNextAllowedAt - now);
+    if (waitMs > 0) {
+      // Schedule a later pump.
+      setTimeout(() => void this.pumpEmbedQueue(), waitMs);
+      return;
+    }
+
+    const job = this.embedQueue.shift();
+    if (!job) return;
+
+    this.embedInFlight++;
+    this.embedNextAllowedAt = Date.now() + minIntervalMs;
+
+    try {
+      const v = await job.run();
+      job.resolve(v);
+    } catch (e) {
+      job.reject(e);
+    } finally {
+      this.embedInFlight--;
+      // Keep draining.
+      void this.pumpEmbedQueue();
+    }
   }
 
   private async postJson<T>(url: string, body: unknown, signal?: AbortSignal): Promise<T> {
@@ -51,7 +105,7 @@ export class YandexAiStudioClient {
 
     if (!res.ok) {
       const txt = await safeReadText(res);
-      throw new Error(`Yandex AI Studio HTTP ${res.status}: ${txt}`);
+      throw new YandexHttpError(res.status, txt);
     }
     return (await res.json()) as T;
   }
@@ -61,12 +115,36 @@ export class YandexAiStudioClient {
    * modelUri example: emb://<folderId>/text-search-doc/latest
    */
   async embedText(modelUri: string, text: string, signal?: AbortSignal): Promise<number[]> {
-    const r = await this.postJson<{ embedding: string[] | number[] }>(
-      'https://llm.api.cloud.yandex.net/foundationModels/v1/textEmbedding',
-      { modelUri, text },
-      signal
-    );
-    return (r.embedding as any[]).map(v => (typeof v === 'string' ? Number(v) : v));
+    // Rate-limit + retry on transient failures (429 / 5xx).
+    return await this.scheduleEmbedding(async () => {
+      const maxAttempts = 8;
+      let attempt = 0;
+      // Base delay: start small, exponential backoff.
+      let backoffMs = 250;
+
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        attempt++;
+        try {
+          const r = await this.postJson<{ embedding: string[] | number[] }>(
+            'https://llm.api.cloud.yandex.net/foundationModels/v1/textEmbedding',
+            { modelUri, text },
+            signal
+          );
+          return (r.embedding as any[]).map(v => (typeof v === 'string' ? Number(v) : v));
+        } catch (e: any) {
+          const status = e instanceof YandexHttpError ? e.status : undefined;
+          const isRetryable = status === 429 || (typeof status === 'number' && status >= 500 && status <= 599);
+          if (!isRetryable || attempt >= maxAttempts) {
+            throw e;
+          }
+          // Jitter to avoid thundering herd.
+          const jitter = Math.floor(Math.random() * 200);
+          await sleep(backoffMs + jitter);
+          backoffMs = Math.min(10_000, backoffMs * 2);
+        }
+      }
+    });
   }
 
   /**
@@ -139,6 +217,20 @@ export class YandexAiStudioClient {
     );
   }
 
+}
+
+class YandexHttpError extends Error {
+  readonly status: number;
+  readonly body: string;
+  constructor(status: number, body: string) {
+    super(`Yandex AI Studio HTTP ${status}: ${body}`);
+    this.status = status;
+    this.body = body;
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function safeReadText(res: Response): Promise<string> {

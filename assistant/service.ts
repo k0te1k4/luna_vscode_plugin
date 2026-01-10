@@ -1,14 +1,16 @@
 import * as path from 'path';
+import * as fs from 'fs/promises';
 import * as vscode from 'vscode';
 import { buildWikiIndex } from './indexer';
 import { getAssistantConfig, withDerivedDefaults } from './config';
 import { getApiKeyFromSecrets, setApiKeyInSecrets, YandexAiStudioClient } from './yandexClient';
 import { loadIndex, topKBySimilarity } from './vectorIndex';
+import { KnowledgeBaseService } from '../kb/service';
 
 export class LunaAssistantService {
   private output?: vscode.OutputChannel;
 
-  constructor(private readonly context: vscode.ExtensionContext) {}
+  constructor(private readonly context: vscode.ExtensionContext, private readonly kb: KnowledgeBaseService) {}
 
   async isEnabled(): Promise<boolean> {
     return getAssistantConfig().enabled;
@@ -32,8 +34,8 @@ export class LunaAssistantService {
   }
 
   async reindexWiki(): Promise<void> {
-    const ws = getWorkspaceRoot();
-    if (!ws) throw new Error('Откройте папку (workspace) в VS Code.');
+    const folder = this.kb.getActiveFolder();
+    if (!folder) throw new Error('Откройте папку (workspace) в VS Code.');
 
     const baseCfg = withDerivedDefaults(getAssistantConfig());
     if (!baseCfg.enabled) throw new Error('Ассистент выключен. Включите настройку luna.assistant.enabled.');
@@ -44,16 +46,42 @@ export class LunaAssistantService {
     const apiKey = await getApiKeyFromSecrets(this.context);
     if (!apiKey) throw new Error('API key не задан. Запустите команду “LuNA: Set Yandex API Key”.');
 
-    const wikiRootAbs = path.join(ws, baseCfg.wikiSubmodulePath);
-    const indexAbsPath = path.join(ws, baseCfg.indexStoragePath);
+    const version = this.kb.getVersionForFolder(folder);
+    const indexAbsPath = resolveIndexPath(this.context, folder.uri, baseCfg.indexStorageScope, baseCfg.indexStoragePath, version);
 
     // Передаём folderId (если задан) — это важно для x-folder-id
     const client = new YandexAiStudioClient({ apiKey, folderId: baseCfg.yandexFolderId || undefined });
 
+    // Sync docs from cloud (Object Storage) into local cache, then build index.
+    const wikiRootAbs = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: `LuNA Assistant: индексация базы знаний (${version})`,
+        cancellable: true
+      },
+      async (progress, token) => {
+        await this.kb.syncDocs(version, progress, token);
+        // If cloud has no docs for this version yet, fail fast with a helpful message.
+        const docsRoot = this.kb.docsCacheRoot(version);
+        const mdCount = await countFilesByExt(docsRoot, new Set(['.md', '.markdown', '.txt']));
+        if (mdCount === 0) {
+          const kbCfg = vscode.workspace.getConfiguration('luna');
+          const bucket = kbCfg.get<string>('kb.storage.bucket', '');
+          const basePrefix = kbCfg.get<string>('kb.storage.basePrefix', 'luna-kb');
+          throw new Error(
+            `В облачной базе знаний не найдено документов для версии “${version}”.\n` +
+              `Ожидаемый путь: s3://${bucket}/${basePrefix}/${version}/docs/\n` +
+              `Загрузите Markdown/TXT через “LuNA KB: Upload Docs Files/Folder” или создайте версию и перенесите файлы в этот префикс.`
+          );
+        }
+        return this.kb.docsCacheRoot(version);
+      }
+    );
+
     await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
-        title: 'LuNA Assistant: индексация wiki',
+        title: `LuNA Assistant: embedding + index (${version})`,
         cancellable: true
       },
       async (progress, token) => {
@@ -69,12 +97,12 @@ export class LunaAssistantService {
       }
     );
 
-    vscode.window.showInformationMessage('LuNA Assistant: индекс wiki готов.');
+    vscode.window.showInformationMessage(`LuNA Assistant: индекс базы знаний готов (${version}).`);
   }
 
   async ask(question: string): Promise<string> {
-    const ws = getWorkspaceRoot();
-    if (!ws) throw new Error('Откройте папку (workspace) в VS Code.');
+    const folder = this.kb.getActiveFolder();
+    if (!folder) throw new Error('Откройте папку (workspace) в VS Code.');
 
     const baseCfg = withDerivedDefaults(getAssistantConfig());
     if (!baseCfg.enabled) throw new Error('Ассистент выключен. Включите настройку luna.assistant.enabled.');
@@ -89,9 +117,10 @@ export class LunaAssistantService {
       throw new Error('Не задан luna.assistant.generationModelUri (например gpt://<folderId>/yandexgpt-lite/latest).');
     }
 
-    const indexAbsPath = path.join(ws, baseCfg.indexStoragePath);
+    const version = this.kb.getVersionForFolder(folder);
+    const indexAbsPath = resolveIndexPath(this.context, folder.uri, baseCfg.indexStorageScope, baseCfg.indexStoragePath, version);
     const idx = await loadIndex(indexAbsPath);
-    if (!idx) throw new Error('Индекс не найден. Выполните “LuNA: Reindex Wiki for Assistant”.');
+    if (!idx) throw new Error('Индекс не найден. Выполните “LuNA: Reindex Knowledge Base for Assistant”.');
 
     const client = new YandexAiStudioClient({ apiKey, folderId: baseCfg.yandexFolderId || undefined });
 
@@ -106,11 +135,11 @@ export class LunaAssistantService {
       .join('\n\n');
 
     const system =
-      'Ты — технический ассистент по языку LuNA. Отвечай ТОЛЬКО на основе переданного контекста wiki. ' +
-      'Если в контексте нет ответа, честно скажи, что в wiki этого нет, и предложи, какой файл/раздел стоит дополнить.';
+      'Ты — технический ассистент по языку LuNA. Отвечай ТОЛЬКО на основе переданного контекста базы знаний. ' +
+      'Если в контексте нет ответа, честно скажи, что в базе знаний этого нет, и предложи, какой файл/раздел стоит дополнить.';
 
     const user =
-      `Контекст (фрагменты wiki):\n\n${contextBlocks}\n\n` +
+      `Контекст (фрагменты базы знаний):\n\n${contextBlocks}\n\n` +
       `Вопрос: ${question}\n\n` +
       'Сформулируй ответ по-русски. Если используешь факты, укажи ссылки на номера фрагментов [#1], [#2], ...';
 
@@ -274,6 +303,20 @@ function getWorkspaceRoot(): string | undefined {
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 }
 
+function resolveIndexPath(
+  context: vscode.ExtensionContext,
+  folderUri: vscode.Uri,
+  scope: 'global' | 'workspace',
+  relPath: string,
+  version: string
+): string {
+  const base = scope === 'workspace' ? folderUri.fsPath : context.globalStorageUri.fsPath;
+  const cleaned = String(relPath || 'assistant/index.json').replace(/\\/g, '/').replace(/^\/+/, '');
+  const dir = path.dirname(cleaned);
+  const file = path.basename(cleaned);
+  return path.join(base, dir, version, file);
+}
+
 function isExplainSupported(doc: vscode.TextDocument): boolean {
   const fsPath = doc.uri.fsPath.toLowerCase();
   if (fsPath.endsWith('.fa')) return true;
@@ -285,6 +328,37 @@ function isExplainSupported(doc: vscode.TextDocument): boolean {
 function clampTextByChars(s: string, maxChars: number): string {
   if (s.length <= maxChars) return s;
   return s.slice(0, maxChars) + `\n\n/* …TRUNCATED: original length ${s.length} chars, limit ${maxChars}… */`;
+}
+
+async function countFilesByExt(rootAbs: string, exts: Set<string>): Promise<number> {
+  try {
+    const st = await fs.stat(rootAbs);
+    if (!st.isDirectory()) return 0;
+  } catch {
+    return 0;
+  }
+
+  let count = 0;
+  const stack: string[] = [rootAbs];
+  while (stack.length) {
+    const dir = stack.pop()!;
+    let entries: any[];
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true } as any);
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        stack.push(p);
+      } else if (e.isFile()) {
+        const ext = path.extname(e.name).toLowerCase();
+        if (exts.has(ext)) count++;
+      }
+    }
+  }
+  return count;
 }
 
 function guessFence(languageId: string, filePath: string): string {

@@ -2,7 +2,17 @@ import * as vscode from 'vscode';
 
 export type AssistantConfig = {
   enabled: boolean;
-  wikiSubmodulePath: string;
+  /**
+   * Where to store local index + cached docs.
+   * - global: extension globalStorage (recommended)
+   * - workspace: inside workspace folder
+   */
+  indexStorageScope: 'global' | 'workspace';
+
+  /**
+   * Index file path. If indexStorageScope='workspace' then it is relative to workspace root.
+   * If indexStorageScope='global' then it is relative to extension globalStorage.
+   */
   indexStoragePath: string;
   yandexFolderId: string;
   docEmbeddingModelUri: string;
@@ -17,8 +27,8 @@ export function getAssistantConfig(): AssistantConfig {
   const cfg = vscode.workspace.getConfiguration('luna');
   return {
     enabled: cfg.get<boolean>('assistant.enabled', false),
-    wikiSubmodulePath: cfg.get<string>('assistant.wikiSubmodulePath', 'luna.wiki'),
-    indexStoragePath: cfg.get<string>('assistant.indexStoragePath', '.luna/assistant/index.json'),
+    indexStorageScope: cfg.get<'global' | 'workspace'>('assistant.indexStorageScope', 'global'),
+    indexStoragePath: cfg.get<string>('assistant.indexStoragePath', 'assistant/index.json'),
     yandexFolderId: cfg.get<string>('assistant.yandexFolderId', ''),
     docEmbeddingModelUri: cfg.get<string>('assistant.docEmbeddingModelUri', ''),
     queryEmbeddingModelUri: cfg.get<string>('assistant.queryEmbeddingModelUri', ''),

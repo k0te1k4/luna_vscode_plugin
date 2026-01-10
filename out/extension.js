@@ -40,6 +40,11 @@ const path = __importStar(require("path"));
 const node_1 = require("vscode-languageclient/node");
 const service_1 = require("./assistant/service");
 const panel_1 = require("./assistant/panel");
+const storage_1 = require("./kb/storage");
+const service_2 = require("./kb/service");
+const tree_1 = require("./kb/tree");
+const projectsView_1 = require("./kb/projectsView");
+const commands_1 = require("./kb/commands");
 let client;
 const LUNA_KEYWORDS = [
     'sub', 'df', 'cf', 'stealable', 'import',
@@ -66,7 +71,22 @@ const LUNA_SNIPPETS = [
     }
 ];
 function activate(context) {
-    const assistant = new service_1.LunaAssistantService(context);
+    // --- Knowledge Base (Yandex Object Storage) ---
+    const kbStorage = new storage_1.KnowledgeBaseStorage(context);
+    const kbService = new service_2.KnowledgeBaseService(context, kbStorage);
+    const kbTreeProvider = new tree_1.KnowledgeBaseTreeProvider(context, kbStorage);
+    const projectsTreeProvider = new projectsView_1.LunaProjectsTreeProvider();
+    // Register Tree Views
+    vscode.window.createTreeView('lunaKnowledgeBaseView', { treeDataProvider: kbTreeProvider });
+    vscode.window.createTreeView('lunaProjectsView', { treeDataProvider: projectsTreeProvider });
+    // Status bar: KB version
+    const kbStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 101);
+    kbStatus.command = 'luna.kb.statusBar.selectVersion';
+    kbStatus.show();
+    context.subscriptions.push(kbStatus);
+    (0, commands_1.registerKbCommands)({ context, kb: kbService, storage: kbStorage, tree: kbTreeProvider, projects: projectsTreeProvider, statusBar: kbStatus });
+    // --- AI Assistant ---
+    const assistant = new service_1.LunaAssistantService(context, kbService);
     const panel = new panel_1.AssistantPanel(context, {
         onAsk: async (q) => assistant.ask(q),
         onReindex: async () => assistant.reindexWiki()
@@ -130,7 +150,7 @@ function activate(context) {
     // --- Status bar ---
     const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     status.command = 'luna.assistant.open';
-    status.tooltip = 'LuNA AI Assistant (Wiki RAG)';
+    status.tooltip = 'LuNA AI Assistant (Knowledge Base RAG)';
     status.text = 'LuNA AI: off';
     status.show();
     context.subscriptions.push(status);

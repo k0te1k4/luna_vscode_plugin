@@ -5,8 +5,55 @@ exports.getApiKeyFromSecrets = getApiKeyFromSecrets;
 exports.setApiKeyInSecrets = setApiKeyInSecrets;
 class YandexAiStudioClient {
     constructor(opts) {
+        // ---- Known YC AI Studio rate limits ----
+        // Embeddings are commonly limited to 10 req/s. Keep a safety margin.
+        // If you hit 429, reduce embedMaxRps / embedMaxConcurrency.
+        this.embedMaxRps = 8;
+        this.embedMaxConcurrency = 2;
+        // Simple in-process scheduler to enforce RPS + concurrency.
+        this.embedQueue = [];
+        this.embedInFlight = 0;
+        this.embedNextAllowedAt = 0;
         this.apiKey = opts.apiKey;
         this.folderId = opts.folderId;
+    }
+    scheduleEmbedding(fn) {
+        return new Promise((resolve, reject) => {
+            this.embedQueue.push({ run: fn, resolve, reject });
+            void this.pumpEmbedQueue();
+        });
+    }
+    async pumpEmbedQueue() {
+        // Avoid concurrent pumps spinning.
+        if (this.embedInFlight >= this.embedMaxConcurrency)
+            return;
+        if (this.embedQueue.length === 0)
+            return;
+        const now = Date.now();
+        const minIntervalMs = Math.ceil(1000 / Math.max(1, this.embedMaxRps));
+        const waitMs = Math.max(0, this.embedNextAllowedAt - now);
+        if (waitMs > 0) {
+            // Schedule a later pump.
+            setTimeout(() => void this.pumpEmbedQueue(), waitMs);
+            return;
+        }
+        const job = this.embedQueue.shift();
+        if (!job)
+            return;
+        this.embedInFlight++;
+        this.embedNextAllowedAt = Date.now() + minIntervalMs;
+        try {
+            const v = await job.run();
+            job.resolve(v);
+        }
+        catch (e) {
+            job.reject(e);
+        }
+        finally {
+            this.embedInFlight--;
+            // Keep draining.
+            void this.pumpEmbedQueue();
+        }
     }
     async postJson(url, body, signal) {
         const headers = {
@@ -26,7 +73,7 @@ class YandexAiStudioClient {
         });
         if (!res.ok) {
             const txt = await safeReadText(res);
-            throw new Error(`Yandex AI Studio HTTP ${res.status}: ${txt}`);
+            throw new YandexHttpError(res.status, txt);
         }
         return (await res.json());
     }
@@ -35,8 +82,32 @@ class YandexAiStudioClient {
      * modelUri example: emb://<folderId>/text-search-doc/latest
      */
     async embedText(modelUri, text, signal) {
-        const r = await this.postJson('https://llm.api.cloud.yandex.net/foundationModels/v1/textEmbedding', { modelUri, text }, signal);
-        return r.embedding.map(v => (typeof v === 'string' ? Number(v) : v));
+        // Rate-limit + retry on transient failures (429 / 5xx).
+        return await this.scheduleEmbedding(async () => {
+            const maxAttempts = 8;
+            let attempt = 0;
+            // Base delay: start small, exponential backoff.
+            let backoffMs = 250;
+            // eslint-disable-next-line no-constant-condition
+            while (true) {
+                attempt++;
+                try {
+                    const r = await this.postJson('https://llm.api.cloud.yandex.net/foundationModels/v1/textEmbedding', { modelUri, text }, signal);
+                    return r.embedding.map(v => (typeof v === 'string' ? Number(v) : v));
+                }
+                catch (e) {
+                    const status = e instanceof YandexHttpError ? e.status : undefined;
+                    const isRetryable = status === 429 || (typeof status === 'number' && status >= 500 && status <= 599);
+                    if (!isRetryable || attempt >= maxAttempts) {
+                        throw e;
+                    }
+                    // Jitter to avoid thundering herd.
+                    const jitter = Math.floor(Math.random() * 200);
+                    await sleep(backoffMs + jitter);
+                    backoffMs = Math.min(10000, backoffMs * 2);
+                }
+            }
+        });
     }
     /**
      * Chat Completions API (OpenAI-compatible):
@@ -90,6 +161,16 @@ class YandexAiStudioClient {
     }
 }
 exports.YandexAiStudioClient = YandexAiStudioClient;
+class YandexHttpError extends Error {
+    constructor(status, body) {
+        super(`Yandex AI Studio HTTP ${status}: ${body}`);
+        this.status = status;
+        this.body = body;
+    }
+}
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
 async function safeReadText(res) {
     try {
         return await res.text();

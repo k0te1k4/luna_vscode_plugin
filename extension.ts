@@ -9,6 +9,11 @@ import {
 
 import { LunaAssistantService } from './assistant/service';
 import { AssistantPanel } from './assistant/panel';
+import { KnowledgeBaseStorage } from './kb/storage';
+import { KnowledgeBaseService } from './kb/service';
+import { KnowledgeBaseTreeProvider } from './kb/tree';
+import { LunaProjectsTreeProvider } from './kb/projectsView';
+import { registerKbCommands } from './kb/commands';
 
 let client: LanguageClient | undefined;
 
@@ -39,7 +44,27 @@ const LUNA_SNIPPETS: { label: string; insertText: vscode.SnippetString; document
 ];
 
 export function activate(context: vscode.ExtensionContext) {
-  const assistant = new LunaAssistantService(context);
+  // --- Knowledge Base (Yandex Object Storage) ---
+  const kbStorage = new KnowledgeBaseStorage(context);
+  const kbService = new KnowledgeBaseService(context, kbStorage);
+
+  const kbTreeProvider = new KnowledgeBaseTreeProvider(context, kbStorage);
+  const projectsTreeProvider = new LunaProjectsTreeProvider();
+
+  // Register Tree Views
+  vscode.window.createTreeView('lunaKnowledgeBaseView', { treeDataProvider: kbTreeProvider });
+  vscode.window.createTreeView('lunaProjectsView', { treeDataProvider: projectsTreeProvider });
+
+  // Status bar: KB version
+  const kbStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 101);
+  kbStatus.command = 'luna.kb.statusBar.selectVersion';
+  kbStatus.show();
+  context.subscriptions.push(kbStatus);
+
+  registerKbCommands({ context, kb: kbService, storage: kbStorage, tree: kbTreeProvider, projects: projectsTreeProvider, statusBar: kbStatus });
+
+  // --- AI Assistant ---
+  const assistant = new LunaAssistantService(context, kbService);
 
   const panel = new AssistantPanel(context, {
     onAsk: async (q) => assistant.ask(q),
@@ -104,7 +129,7 @@ export function activate(context: vscode.ExtensionContext) {
   // --- Status bar ---
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   status.command = 'luna.assistant.open';
-  status.tooltip = 'LuNA AI Assistant (Wiki RAG)';
+  status.tooltip = 'LuNA AI Assistant (Knowledge Base RAG)';
   status.text = 'LuNA AI: off';
   status.show();
   context.subscriptions.push(status);

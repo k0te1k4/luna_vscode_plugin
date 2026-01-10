@@ -10,6 +10,13 @@ type ChunkPlan = {
   text: string;
 };
 
+export type KnowledgeBaseDocument = {
+  id: string;
+  title: string;
+  content: string;
+  sourcePath?: string;
+};
+
 export async function buildWikiIndex(params: {
   wikiRootAbs: string;
   indexAbsPath: string;
@@ -57,6 +64,53 @@ export async function buildWikiIndex(params: {
   return idx;
 }
 
+export async function buildKnowledgeBaseIndex(params: {
+  documents: KnowledgeBaseDocument[];
+  indexAbsPath: string;
+  docEmbeddingModelUri: string;
+  chunkChars: number;
+  client: YandexAiStudioClient;
+  cancellationToken?: vscode.CancellationToken;
+  progress?: vscode.Progress<{ message?: string; increment?: number }>;
+}): Promise<IndexFile> {
+  const plans: ChunkPlan[] = [];
+
+  for (const doc of params.documents) {
+    const sourcePath = doc.sourcePath ?? `kb/${doc.id}`;
+    const docPlans = chunkMarkdown(doc.content, params.chunkChars).map(p => ({
+      ...p,
+      sourcePath,
+      heading: p.heading ?? doc.title ?? null
+    }));
+    plans.push(...docPlans);
+  }
+
+  const chunks: IndexedChunk[] = [];
+  const total = plans.length;
+
+  for (const plan of plans) {
+    if (params.cancellationToken?.isCancellationRequested) {
+      throw new Error('Indexing cancelled');
+    }
+    params.progress?.report({ message: `Embedding: ${plan.sourcePath}`, increment: (1 / Math.max(1, total)) * 100 });
+
+    const embedding = await params.client.embedText(params.docEmbeddingModelUri, plan.text);
+    const id = `${plan.sourcePath}::${hashForId(plan.heading ?? '')}::${hashForId(plan.text.slice(0, 256))}`;
+    chunks.push({ id, sourcePath: plan.sourcePath, heading: plan.heading, text: plan.text, embedding });
+  }
+
+  const idx: IndexFile = {
+    schemaVersion: 1,
+    createdAt: new Date().toISOString(),
+    modelUri: params.docEmbeddingModelUri,
+    chunkChars: params.chunkChars,
+    chunks
+  };
+
+  await saveIndex(params.indexAbsPath, idx);
+  return idx;
+}
+
 async function collectMarkdownFiles(root: string): Promise<string[]> {
   const out: string[] = [];
   async function walk(dir: string) {
@@ -86,7 +140,7 @@ function normalizeRel(rel: string): string {
  *  - split by headings (#, ##, ...)
  *  - inside each section, further split by approximate char size
  */
-function chunkMarkdown(md: string, chunkChars: number): Array<{ heading: string | null; text: string }> {
+export function chunkMarkdown(md: string, chunkChars: number): Array<{ heading: string | null; text: string }> {
   const lines = md.replace(/\r\n/g, '\n').split('\n');
   type Section = { heading: string | null; lines: string[] };
   const sections: Section[] = [];

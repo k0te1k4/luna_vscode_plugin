@@ -43,7 +43,13 @@ export function activate(context: vscode.ExtensionContext) {
 
   const panel = new AssistantPanel(context, {
     onAsk: async (q) => assistant.ask(q),
-    onReindex: async () => assistant.reindexWiki()
+    onReindex: async () => assistant.reindexWiki(),
+    onGetKnowledgeState: async () => assistant.getKnowledgeBaseState(),
+    onSetKnowledgeProject: async (projectId, version) => assistant.setKnowledgeBaseSelection(projectId, version),
+    onGetKnowledgeArticle: async (articleId) => assistant.getKnowledgeBaseArticle(articleId),
+    onUploadKnowledgeArticle: async (title, content) => assistant.uploadKnowledgeBaseArticle(title, content),
+    onDeleteKnowledgeArticle: async (articleId) => assistant.deleteKnowledgeBaseArticle(articleId),
+    onPickKnowledgeArticleFile: async () => assistant.pickKnowledgeBaseArticleFile()
   });
 
   // --- Commands (MUST match package.json exactly) ---

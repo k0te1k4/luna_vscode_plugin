@@ -98,13 +98,28 @@
         },
         "luna.assistant.indexStoragePath": {
           "type": "string",
-          "default": ".luna/assistant/index.json",
-          "description": "Куда сохранять локальный индекс (эмбеддинги + метаданные). Относительно корня workspace."
+          "default": "",
+          "description": "Куда сохранять локальный индекс (эмбеддинги + метаданные). Если пусто — индекс хранится в global storage расширения."
         },
         "luna.assistant.yandexFolderId": {
           "type": "string",
           "default": "",
           "description": "Folder ID в Yandex Cloud. Нужен, чтобы сформировать modelUri для эмбеддингов/генерации (например emb://<folder>/text-search-doc/latest)."
+        },
+        "luna.assistant.knowledgeBase.apiBaseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Base URL для облачной базы знаний LuNA (REST API). Если задан, статьи берутся из облака."
+        },
+        "luna.assistant.knowledgeBase.projectId": {
+          "type": "string",
+          "default": "",
+          "description": "Выбранный проект базы знаний LuNA. Выбирается в UI."
+        },
+        "luna.assistant.knowledgeBase.projectVersion": {
+          "type": "string",
+          "default": "",
+          "description": "Выбранная версия базы знаний (например LuNA 6/7). Выбирается в UI."
         },
         "luna.assistant.docEmbeddingModelUri": {
           "type": "string",

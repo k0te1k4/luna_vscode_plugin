@@ -5,6 +5,9 @@ export type AssistantConfig = {
   wikiSubmodulePath: string;
   indexStoragePath: string;
   yandexFolderId: string;
+  knowledgeBaseApiBaseUrl: string;
+  knowledgeBaseProjectId: string;
+  knowledgeBaseProjectVersion: string;
   docEmbeddingModelUri: string;
   queryEmbeddingModelUri: string;
   generationModelUri: string;
@@ -18,8 +21,11 @@ export function getAssistantConfig(): AssistantConfig {
   return {
     enabled: cfg.get<boolean>('assistant.enabled', false),
     wikiSubmodulePath: cfg.get<string>('assistant.wikiSubmodulePath', 'luna.wiki'),
-    indexStoragePath: cfg.get<string>('assistant.indexStoragePath', '.luna/assistant/index.json'),
+    indexStoragePath: cfg.get<string>('assistant.indexStoragePath', ''),
     yandexFolderId: cfg.get<string>('assistant.yandexFolderId', ''),
+    knowledgeBaseApiBaseUrl: cfg.get<string>('assistant.knowledgeBase.apiBaseUrl', ''),
+    knowledgeBaseProjectId: cfg.get<string>('assistant.knowledgeBase.projectId', ''),
+    knowledgeBaseProjectVersion: cfg.get<string>('assistant.knowledgeBase.projectVersion', ''),
     docEmbeddingModelUri: cfg.get<string>('assistant.docEmbeddingModelUri', ''),
     queryEmbeddingModelUri: cfg.get<string>('assistant.queryEmbeddingModelUri', ''),
     generationModelUri: cfg.get<string>('assistant.generationModelUri', ''),

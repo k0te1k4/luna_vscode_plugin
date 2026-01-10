@@ -1,7 +1,8 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { buildWikiIndex } from './indexer';
+import { buildKnowledgeBaseIndex, buildWikiIndex, KnowledgeBaseDocument } from './indexer';
 import { getAssistantConfig, withDerivedDefaults } from './config';
+import { KnowledgeBaseArticle, KnowledgeBaseArticleSummary, KnowledgeBaseClient, KnowledgeBaseProject } from './knowledgeBaseClient';
 import { getApiKeyFromSecrets, setApiKeyInSecrets, YandexAiStudioClient } from './yandexClient';
 import { loadIndex, topKBySimilarity } from './vectorIndex';
 
@@ -44,8 +45,8 @@ export class LunaAssistantService {
     const apiKey = await getApiKeyFromSecrets(this.context);
     if (!apiKey) throw new Error('API key не задан. Запустите команду “LuNA: Set Yandex API Key”.');
 
-    const wikiRootAbs = path.join(ws, baseCfg.wikiSubmodulePath);
-    const indexAbsPath = path.join(ws, baseCfg.indexStoragePath);
+    const { projectId, version } = this.getSelectedKnowledgeBase(baseCfg);
+    const indexAbsPath = this.resolveIndexPath(ws, baseCfg, projectId, version);
 
     // Передаём folderId (если задан) — это важно для x-folder-id
     const client = new YandexAiStudioClient({ apiKey, folderId: baseCfg.yandexFolderId || undefined });
@@ -57,15 +58,29 @@ export class LunaAssistantService {
         cancellable: true
       },
       async (progress, token) => {
-        await buildWikiIndex({
-          wikiRootAbs,
-          indexAbsPath,
-          docEmbeddingModelUri: baseCfg.docEmbeddingModelUri,
-          chunkChars: baseCfg.chunkChars,
-          client,
-          cancellationToken: token,
-          progress
-        });
+        if (baseCfg.knowledgeBaseApiBaseUrl) {
+          const documents = await this.fetchKnowledgeBaseDocuments(baseCfg, apiKey);
+          await buildKnowledgeBaseIndex({
+            documents,
+            indexAbsPath,
+            docEmbeddingModelUri: baseCfg.docEmbeddingModelUri,
+            chunkChars: baseCfg.chunkChars,
+            client,
+            cancellationToken: token,
+            progress
+          });
+        } else {
+          const wikiRootAbs = path.join(ws, baseCfg.wikiSubmodulePath);
+          await buildWikiIndex({
+            wikiRootAbs,
+            indexAbsPath,
+            docEmbeddingModelUri: baseCfg.docEmbeddingModelUri,
+            chunkChars: baseCfg.chunkChars,
+            client,
+            cancellationToken: token,
+            progress
+          });
+        }
       }
     );
 
@@ -89,7 +104,8 @@ export class LunaAssistantService {
       throw new Error('Не задан luna.assistant.generationModelUri (например gpt://<folderId>/yandexgpt-lite/latest).');
     }
 
-    const indexAbsPath = path.join(ws, baseCfg.indexStoragePath);
+    const { projectId, version } = this.getSelectedKnowledgeBase(baseCfg);
+    const indexAbsPath = this.resolveIndexPath(ws, baseCfg, projectId, version);
     const idx = await loadIndex(indexAbsPath);
     if (!idx) throw new Error('Индекс не найден. Выполните “LuNA: Reindex Wiki for Assistant”.');
 
@@ -262,11 +278,176 @@ export class LunaAssistantService {
     this.getOutput().show(true);
   }
 
+  async getKnowledgeBaseState(): Promise<{
+    enabled: boolean;
+    projects: KnowledgeBaseProject[];
+    selectedProjectId: string;
+    selectedVersion: string;
+    articles: KnowledgeBaseArticleSummary[];
+    message?: string;
+  }> {
+    const baseCfg = withDerivedDefaults(getAssistantConfig());
+    if (!baseCfg.knowledgeBaseApiBaseUrl) {
+      return {
+        enabled: false,
+        projects: [],
+        selectedProjectId: baseCfg.knowledgeBaseProjectId,
+        selectedVersion: baseCfg.knowledgeBaseProjectVersion,
+        articles: [],
+        message: 'Настройте luna.assistant.knowledgeBase.apiBaseUrl, чтобы включить облачную базу знаний.'
+      };
+    }
+
+    const apiKey = await getApiKeyFromSecrets(this.context);
+    if (!apiKey) {
+      return {
+        enabled: false,
+        projects: [],
+        selectedProjectId: baseCfg.knowledgeBaseProjectId,
+        selectedVersion: baseCfg.knowledgeBaseProjectVersion,
+        articles: [],
+        message: 'API key не задан. Запустите команду “LuNA: Set Yandex API Key”.'
+      };
+    }
+
+    const kbClient = new KnowledgeBaseClient({ apiKey, baseUrl: baseCfg.knowledgeBaseApiBaseUrl });
+    const projects = await kbClient.listProjects();
+    const selectedProjectId = baseCfg.knowledgeBaseProjectId || projects[0]?.id || '';
+    const selectedVersion =
+      baseCfg.knowledgeBaseProjectVersion || projects.find(p => p.id === selectedProjectId)?.versions?.[0] || '';
+
+    if ((!baseCfg.knowledgeBaseProjectId && selectedProjectId) || (!baseCfg.knowledgeBaseProjectVersion && selectedVersion)) {
+      const cfg = vscode.workspace.getConfiguration('luna');
+      if (selectedProjectId && !baseCfg.knowledgeBaseProjectId) {
+        await cfg.update('assistant.knowledgeBase.projectId', selectedProjectId, vscode.ConfigurationTarget.Workspace);
+      }
+      if (selectedVersion && !baseCfg.knowledgeBaseProjectVersion) {
+        await cfg.update('assistant.knowledgeBase.projectVersion', selectedVersion, vscode.ConfigurationTarget.Workspace);
+      }
+    }
+
+    let articles: KnowledgeBaseArticleSummary[] = [];
+    if (selectedProjectId && selectedVersion) {
+      articles = await kbClient.listArticles(selectedProjectId, selectedVersion);
+    }
+
+    return {
+      enabled: true,
+      projects,
+      selectedProjectId,
+      selectedVersion,
+      articles
+    };
+  }
+
+  async setKnowledgeBaseSelection(projectId: string, version: string): Promise<void> {
+    const cfg = vscode.workspace.getConfiguration('luna');
+    await cfg.update('assistant.knowledgeBase.projectId', projectId, vscode.ConfigurationTarget.Workspace);
+    await cfg.update('assistant.knowledgeBase.projectVersion', version, vscode.ConfigurationTarget.Workspace);
+  }
+
+  async getKnowledgeBaseArticle(articleId: string): Promise<KnowledgeBaseArticle> {
+    const baseCfg = withDerivedDefaults(getAssistantConfig());
+    const apiKey = await getApiKeyFromSecrets(this.context);
+    if (!apiKey) throw new Error('API key не задан. Запустите команду “LuNA: Set Yandex API Key”.');
+    if (!baseCfg.knowledgeBaseApiBaseUrl) throw new Error('Не задан luna.assistant.knowledgeBase.apiBaseUrl.');
+
+    const { projectId, version } = this.getSelectedKnowledgeBase(baseCfg);
+    const kbClient = new KnowledgeBaseClient({ apiKey, baseUrl: baseCfg.knowledgeBaseApiBaseUrl });
+    return await kbClient.getArticle(projectId, version, articleId);
+  }
+
+  async uploadKnowledgeBaseArticle(title: string, content: string): Promise<void> {
+    const baseCfg = withDerivedDefaults(getAssistantConfig());
+    const apiKey = await getApiKeyFromSecrets(this.context);
+    if (!apiKey) throw new Error('API key не задан. Запустите команду “LuNA: Set Yandex API Key”.');
+    if (!baseCfg.knowledgeBaseApiBaseUrl) throw new Error('Не задан luna.assistant.knowledgeBase.apiBaseUrl.');
+
+    const { projectId, version } = this.getSelectedKnowledgeBase(baseCfg);
+    const kbClient = new KnowledgeBaseClient({ apiKey, baseUrl: baseCfg.knowledgeBaseApiBaseUrl });
+    await kbClient.uploadArticle(projectId, version, title, content);
+  }
+
+  async deleteKnowledgeBaseArticle(articleId: string): Promise<void> {
+    const baseCfg = withDerivedDefaults(getAssistantConfig());
+    const apiKey = await getApiKeyFromSecrets(this.context);
+    if (!apiKey) throw new Error('API key не задан. Запустите команду “LuNA: Set Yandex API Key”.');
+    if (!baseCfg.knowledgeBaseApiBaseUrl) throw new Error('Не задан luna.assistant.knowledgeBase.apiBaseUrl.');
+
+    const { projectId, version } = this.getSelectedKnowledgeBase(baseCfg);
+    const kbClient = new KnowledgeBaseClient({ apiKey, baseUrl: baseCfg.knowledgeBaseApiBaseUrl });
+    await kbClient.deleteArticle(projectId, version, articleId);
+  }
+
+  async pickKnowledgeBaseArticleFile(): Promise<{ title: string; content: string } | undefined> {
+    const result = await vscode.window.showOpenDialog({
+      canSelectMany: false,
+      filters: {
+        Markdown: ['md', 'markdown'],
+        Text: ['txt']
+      },
+      openLabel: 'Загрузить статью'
+    });
+    if (!result?.length) return undefined;
+    const fileUri = result[0];
+    const raw = await vscode.workspace.fs.readFile(fileUri);
+    const content = Buffer.from(raw).toString('utf8');
+    const title = path.basename(fileUri.fsPath).replace(/\.(md|markdown|txt)$/i, '');
+    return { title, content };
+  }
+
   private getOutput(): vscode.OutputChannel {
     if (!this.output) {
       this.output = vscode.window.createOutputChannel('LuNA Assistant');
     }
     return this.output;
+  }
+
+  private resolveIndexPath(
+    wsRoot: string,
+    cfg: ReturnType<typeof getAssistantConfig>,
+    projectId?: string,
+    version?: string
+  ): string {
+    if (cfg.indexStoragePath) {
+      return path.join(wsRoot, cfg.indexStoragePath);
+    }
+    const storageBase =
+      this.context.globalStorageUri?.fsPath || this.context.storageUri?.fsPath || path.join(wsRoot, '.luna');
+    const safeProject = projectId || 'default-project';
+    const safeVersion = version || 'default-version';
+    return path.join(storageBase, 'assistant', safeProject, safeVersion, 'index.json');
+  }
+
+  private getSelectedKnowledgeBase(cfg: ReturnType<typeof getAssistantConfig>): { projectId: string; version: string } {
+    if (cfg.knowledgeBaseApiBaseUrl) {
+      const projectId = cfg.knowledgeBaseProjectId;
+      const version = cfg.knowledgeBaseProjectVersion;
+      if (!projectId || !version) {
+        throw new Error('Выберите проект и версию базы знаний в панели LuNA Assistant.');
+      }
+      return { projectId, version };
+    }
+    return { projectId: '', version: '' };
+  }
+
+  private async fetchKnowledgeBaseDocuments(cfg: ReturnType<typeof getAssistantConfig>, apiKey: string): Promise<KnowledgeBaseDocument[]> {
+    if (!cfg.knowledgeBaseApiBaseUrl) return [];
+    const { projectId, version } = this.getSelectedKnowledgeBase(cfg);
+    const kbClient = new KnowledgeBaseClient({ apiKey, baseUrl: cfg.knowledgeBaseApiBaseUrl });
+    const summaries = await kbClient.listArticles(projectId, version);
+    const docs: KnowledgeBaseDocument[] = [];
+
+    for (const summary of summaries) {
+      const article = await kbClient.getArticle(projectId, version, summary.id);
+      docs.push({
+        id: summary.id,
+        title: article.title || summary.title,
+        content: article.content,
+        sourcePath: `kb/${projectId}/${version}/${summary.id}`
+      });
+    }
+    return docs;
   }
 }
 

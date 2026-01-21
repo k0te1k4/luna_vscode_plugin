@@ -88,7 +88,7 @@ function activate(context) {
     // --- AI Assistant ---
     const assistant = new service_1.LunaAssistantService(context, kbService);
     const panel = new panel_1.AssistantPanel(context, {
-        onAsk: async (q) => assistant.ask(q),
+        onAsk: async (q, onDelta) => assistant.ask(q, onDelta),
         onReindex: async () => assistant.reindexWiki()
     });
     // --- Commands (MUST match package.json exactly) ---
@@ -168,7 +168,24 @@ function activate(context) {
         if (e.affectsConfiguration('luna.assistant.enabled')) {
             updateStatus();
         }
+        // Drop tails when LuNA KB version changes for any workspace folder.
+        if (e.affectsConfiguration('luna.kb.projectVersion') || e.affectsConfiguration('luna.kb.defaultVersion')) {
+            for (const f of vscode.workspace.workspaceFolders || []) {
+                const cur = kbService.getVersionForFolder(f);
+                const key = `luna.kb._lastSeenVersion.${f.uri.toString()}`;
+                const prev = context.globalState.get(key) || cur;
+                if (prev !== cur) {
+                    void assistant.handleVersionChange(f, prev, cur);
+                    void context.globalState.update(key, cur);
+                }
+            }
+        }
     }));
+    // Initialize last-seen versions for open folders.
+    for (const f of vscode.workspace.workspaceFolders || []) {
+        const key = `luna.kb._lastSeenVersion.${f.uri.toString()}`;
+        void context.globalState.update(key, kbService.getVersionForFolder(f));
+    }
     // --- Completion provider for .fa and ucodes.cpp ---
     const selector = [
         { scheme: 'file', language: 'luna' },

@@ -37,10 +37,35 @@ exports.LunaAssistantService = void 0;
 const path = __importStar(require("path"));
 const fs = __importStar(require("fs/promises"));
 const vscode = __importStar(require("vscode"));
-const indexer_1 = require("./indexer");
 const config_1 = require("./config");
 const yandexClient_1 = require("./yandexClient");
-const vectorIndex_1 = require("./vectorIndex");
+const aiStudioClient_1 = require("./aiStudioClient");
+const vectorStoreManager_1 = require("./vectorStoreManager");
+async function deleteFilesBestEffort(client, fileIds, signal) {
+    // Delete with small concurrency to avoid bursts.
+    const concurrency = 3;
+    let idx = 0;
+    const workers = [];
+    const runOne = async () => {
+        for (;;) {
+            if (signal === null || signal === void 0 ? void 0 : signal.aborted)
+                return;
+            const i = idx++;
+            if (i >= fileIds.length)
+                return;
+            const id = fileIds[i];
+            try {
+                await client.deleteFile(id);
+            }
+            catch (_a) {
+                // ignore (already deleted / not found / etc.)
+            }
+        }
+    };
+    for (let i = 0; i < Math.min(concurrency, fileIds.length); i++)
+        workers.push(runOne());
+    await Promise.all(workers);
+}
 class LunaAssistantService {
     constructor(context, kb) {
         this.context = context;
@@ -66,60 +91,101 @@ class LunaAssistantService {
         vscode.window.showInformationMessage('API key сохранён.');
     }
     async reindexWiki() {
+        var _a;
         const folder = this.kb.getActiveFolder();
         if (!folder)
             throw new Error('Откройте папку (workspace) в VS Code.');
         const baseCfg = (0, config_1.withDerivedDefaults)((0, config_1.getAssistantConfig)());
         if (!baseCfg.enabled)
             throw new Error('Ассистент выключен. Включите настройку luna.assistant.enabled.');
-        if (!baseCfg.docEmbeddingModelUri) {
-            throw new Error('Не задан luna.assistant.docEmbeddingModelUri (или luna.assistant.yandexFolderId для автоподстановки).');
-        }
         const apiKey = await (0, yandexClient_1.getApiKeyFromSecrets)(this.context);
         if (!apiKey)
             throw new Error('API key не задан. Запустите команду “LuNA: Set Yandex API Key”.');
         const version = this.kb.getVersionForFolder(folder);
-        const indexAbsPath = resolveIndexPath(this.context, folder.uri, baseCfg.indexStorageScope, baseCfg.indexStoragePath, version);
-        // Передаём folderId (если задан) — это важно для x-folder-id
-        const client = new yandexClient_1.YandexAiStudioClient({ apiKey, folderId: baseCfg.yandexFolderId || undefined });
-        // Sync docs from cloud (Object Storage) into local cache, then build index.
-        const wikiRootAbs = await vscode.window.withProgress({
+        // 1) Sync wiki docs + user files from cloud (Object Storage) into local cache.
+        const roots = await vscode.window.withProgress({
             location: vscode.ProgressLocation.Notification,
-            title: `LuNA Assistant: индексация базы знаний (${version})`,
+            title: `LuNA Assistant: синхронизация базы знаний (${version})`,
             cancellable: true
         }, async (progress, token) => {
+            // progress/token are VS Code types; keep as any to avoid strict typings issues in this repo snapshot.
             await this.kb.syncDocs(version, progress, token);
-            // If cloud has no docs for this version yet, fail fast with a helpful message.
+            await this.kb.syncUserFiles(version, progress, token);
             const docsRoot = this.kb.docsCacheRoot(version);
-            const mdCount = await countFilesByExt(docsRoot, new Set(['.md', '.markdown', '.txt']));
-            if (mdCount === 0) {
+            const userRoot = this.kb.userFilesCacheRoot(version);
+            const anyCount = (await countFilesByExt(docsRoot, new Set(['.md', '.markdown', '.txt', '.pdf']))) +
+                (await countFilesByExt(userRoot, new Set(['.md', '.markdown', '.txt', '.pdf'])));
+            if (anyCount === 0) {
                 const kbCfg = vscode.workspace.getConfiguration('luna');
                 const bucket = kbCfg.get('kb.storage.bucket', '');
                 const basePrefix = kbCfg.get('kb.storage.basePrefix', 'luna-kb');
                 throw new Error(`В облачной базе знаний не найдено документов для версии “${version}”.\n` +
-                    `Ожидаемый путь: s3://${bucket}/${basePrefix}/${version}/docs/\n` +
-                    `Загрузите Markdown/TXT через “LuNA KB: Upload Docs Files/Folder” или создайте версию и перенесите файлы в этот префикс.`);
+                    `Ожидаемый путь: s3://${bucket}/${basePrefix}/${version}/docs/ (wiki) или .../${version}/user-files/ (ваши файлы)\n` +
+                    `Загрузите .md/.txt/.pdf через “LuNA KB: Upload User Files (Assistant)” или проверьте, что docs/ существует.`);
             }
-            return this.kb.docsCacheRoot(version);
+            return {
+                docsRoot,
+                userRoot
+            };
         });
-        await vscode.window.withProgress({
+        // 2) Create (or recreate) Vector Store + upload docs via Files API + attach them to Vector Store.
+        if (!baseCfg.yandexFolderId) {
+            throw new Error('Не задан luna.assistant.yandexFolderId (это folderId каталога Yandex Cloud).');
+        }
+        const client = new aiStudioClient_1.YandexAIStudioClient({ apiKey, openaiProject: baseCfg.yandexFolderId });
+        // Best-effort cleanup of Files uploaded during the previous reindex for this KB version.
+        // Without this, AI Studio "Files" may accumulate duplicates over time.
+        const metaKey = `luna.assistant.reindexMeta.${version}`;
+        const prevMeta = this.context.globalState.get(metaKey);
+        if ((_a = prevMeta === null || prevMeta === void 0 ? void 0 : prevMeta.uploadedFileIds) === null || _a === void 0 ? void 0 : _a.length) {
+            await vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: `LuNA Assistant: очистка старых файлов AI Studio (${version})`,
+                cancellable: false
+            }, async () => {
+                // 1) Delete previous vector store (best-effort). This helps ensure old content stops being retrieved.
+                if (prevMeta.vectorStoreId) {
+                    try {
+                        await client.deleteVectorStore(prevMeta.vectorStoreId);
+                    }
+                    catch (_a) {
+                        // ignore
+                    }
+                }
+                // 2) Delete uploaded files (best-effort). Ignore errors (already deleted / in use / etc.).
+                await deleteFilesBestEffort(client, prevMeta.uploadedFileIds);
+            });
+        }
+        const storedKey = `luna.assistant.vectorStoreId.${version}`;
+        const cfgVectorStoreId = baseCfg.vectorStoreId || this.context.globalState.get(storedKey) || '';
+        const cfgWithVectorStore = { ...baseCfg, vectorStoreId: cfgVectorStoreId };
+        const res = await vscode.window.withProgress({
             location: vscode.ProgressLocation.Notification,
-            title: `LuNA Assistant: embedding + index (${version})`,
+            title: `LuNA Assistant: создание Vector Store + загрузка файлов (${version})`,
             cancellable: true
         }, async (progress, token) => {
-            await (0, indexer_1.buildWikiIndex)({
-                wikiRootAbs,
-                indexAbsPath,
-                docEmbeddingModelUri: baseCfg.docEmbeddingModelUri,
-                chunkChars: baseCfg.chunkChars,
+            // progress/token are VS Code types; keep as any to avoid strict typings issues in this repo snapshot.
+            return await (0, vectorStoreManager_1.ensureVectorStoreWithFiles)({
                 client,
-                cancellationToken: token,
-                progress
+                cfg: cfgWithVectorStore,
+                kbVersion: version,
+                roots: [
+                    { rootAbs: roots.docsRoot, prefix: 'docs' },
+                    { rootAbs: roots.userRoot, prefix: 'user-files' }
+                ],
+                progress,
+                cancellationToken: token
             });
         });
-        vscode.window.showInformationMessage(`LuNA Assistant: индекс базы знаний готов (${version}).`);
+        await this.context.globalState.update(storedKey, res.vectorStoreId);
+        await this.context.globalState.update(metaKey, {
+            vectorStoreId: res.vectorStoreId,
+            uploadedFileIds: res.uploadedFileIds || [],
+            createdAtIso: new Date().toISOString()
+        });
+        vscode.window.showInformationMessage(`LuNA Assistant: Vector Store готов (${version}). vectorStoreId=${res.vectorStoreId}`);
     }
-    async ask(question) {
+    async ask(question, onDelta) {
         const folder = this.kb.getActiveFolder();
         if (!folder)
             throw new Error('Откройте папку (workspace) в VS Code.');
@@ -129,35 +195,85 @@ class LunaAssistantService {
         const apiKey = await (0, yandexClient_1.getApiKeyFromSecrets)(this.context);
         if (!apiKey)
             throw new Error('API key не задан. Запустите команду “LuNA: Set Yandex API Key”.');
-        if (!baseCfg.queryEmbeddingModelUri) {
-            throw new Error('Не задан luna.assistant.queryEmbeddingModelUri (или luna.assistant.yandexFolderId для автоподстановки).');
-        }
         if (!baseCfg.generationModelUri) {
             throw new Error('Не задан luna.assistant.generationModelUri (например gpt://<folderId>/yandexgpt-lite/latest).');
         }
+        if (!baseCfg.yandexFolderId) {
+            throw new Error('Не задан luna.assistant.yandexFolderId (это folderId каталога Yandex Cloud).');
+        }
         const version = this.kb.getVersionForFolder(folder);
-        const indexAbsPath = resolveIndexPath(this.context, folder.uri, baseCfg.indexStorageScope, baseCfg.indexStoragePath, version);
-        const idx = await (0, vectorIndex_1.loadIndex)(indexAbsPath);
-        if (!idx)
-            throw new Error('Индекс не найден. Выполните “LuNA: Reindex Knowledge Base for Assistant”.');
-        const client = new yandexClient_1.YandexAiStudioClient({ apiKey, folderId: baseCfg.yandexFolderId || undefined });
-        const qEmb = await client.embedText(baseCfg.queryEmbeddingModelUri, question);
-        const top = (0, vectorIndex_1.topKBySimilarity)(qEmb, idx.chunks, baseCfg.topK);
-        const contextBlocks = top
-            .map((t, i) => {
-            const head = t.chunk.heading ? ` — ${t.chunk.heading}` : '';
-            return `[#${i + 1}] ${t.chunk.sourcePath}${head}\n${t.chunk.text}`;
-        })
-            .join('\n\n');
-        const system = 'Ты — технический ассистент по языку LuNA. Отвечай ТОЛЬКО на основе переданного контекста базы знаний. ' +
-            'Если в контексте нет ответа, честно скажи, что в базе знаний этого нет, и предложи, какой файл/раздел стоит дополнить.';
-        const user = `Контекст (фрагменты базы знаний):\n\n${contextBlocks}\n\n` +
-            `Вопрос: ${question}\n\n` +
-            'Сформулируй ответ по-русски. Если используешь факты, укажи ссылки на номера фрагментов [#1], [#2], ...';
-        return await client.completion(baseCfg.generationModelUri, [
-            { role: 'system', text: system },
-            { role: 'user', text: user }
-        ], 1400, 0.2);
+        const vectorStoreId = this.context.globalState.get(`luna.assistant.vectorStoreId.${version}`);
+        if (!vectorStoreId) {
+            throw new Error('Vector Store для текущей версии базы знаний не найден. Сначала выполните “LuNA: Reindex Knowledge Base for Assistant”.');
+        }
+        if (!baseCfg.yandexFolderId) {
+            throw new Error('Не задан luna.assistant.yandexFolderId (это folderId каталога Yandex Cloud).');
+        }
+        const client = new aiStudioClient_1.YandexAIStudioClient({ apiKey, openaiProject: baseCfg.yandexFolderId });
+        const instruction = 'Ты — технический ассистент по языку LuNA. ' +
+            'Отвечай по-русски. ' +
+            'Если используешь сведения из базы знаний, указывай источники (файлы/страницы) и не выдумывай. ' +
+            'Если ответа в базе знаний нет — честно скажи об этом и предложи, какие документы стоит дополнить.';
+        const tools = [
+            {
+                type: 'file_search',
+                vector_store_ids: [vectorStoreId],
+                max_num_results: baseCfg.searchMaxResults || 6
+            }
+        ];
+        if (baseCfg.enableWebSearch)
+            tools.push({ type: 'web_search' });
+        // Persist conversation per workspace folder via previous_response_id.
+        const convKey = `luna.assistant.previousResponseId.${folder.uri.toString()}`;
+        const previous = this.context.globalState.get(convKey) || undefined;
+        let finalText = '';
+        let finalResponse;
+        await client.streamResponse({
+            model: baseCfg.generationModelUri,
+            previous_response_id: previous,
+            input: [
+                { role: 'system', content: [{ type: 'input_text', text: instruction }] },
+                { role: 'user', content: [{ type: 'input_text', text: question }] }
+            ],
+            tool_choice: 'auto',
+            tools
+        }, (evt) => {
+            var _a, _b;
+            if (!evt || typeof evt !== 'object')
+                return;
+            if (evt.type === 'error') {
+                throw new Error(evt.message || 'Response stream error');
+            }
+            if (evt.type === 'response.output_text.delta') {
+                const d = (_b = (_a = evt.delta) !== null && _a !== void 0 ? _a : evt.delt) !== null && _b !== void 0 ? _b : '';
+                if (d) {
+                    finalText += d;
+                    onDelta === null || onDelta === void 0 ? void 0 : onDelta(String(d));
+                }
+            }
+            if (evt.type === 'response.completed') {
+                finalResponse = evt.response;
+            }
+        });
+        if (!finalResponse) {
+            // Fallback (should not normally happen): request without stream.
+            finalResponse = await client.createResponse({
+                model: baseCfg.generationModelUri,
+                previous_response_id: previous,
+                input: [
+                    { role: 'system', content: [{ type: 'input_text', text: instruction }] },
+                    { role: 'user', content: [{ type: 'input_text', text: question }] }
+                ],
+                tools,
+                tool_choice: 'auto'
+            });
+        }
+        const { text, sources } = extractAnswerAndSources(finalResponse);
+        finalText = text || finalText;
+        if (finalResponse === null || finalResponse === void 0 ? void 0 : finalResponse.id) {
+            void this.context.globalState.update(convKey, String(finalResponse.id));
+        }
+        return formatAnswerWithSources(finalText, sources);
     }
     async explainSelection() {
         const editor = vscode.window.activeTextEditor;
@@ -180,6 +296,9 @@ class LunaAssistantService {
         if (!baseCfg.generationModelUri) {
             throw new Error('Не задан luna.assistant.generationModelUri. Пример: gpt://<folderId>/yandexgpt-lite/latest');
         }
+        if (!baseCfg.yandexFolderId) {
+            throw new Error('Не задан luna.assistant.yandexFolderId (это folderId каталога Yandex Cloud).');
+        }
         const code = clampTextByChars(selected, baseCfg.codeExplainMaxChars || 16000);
         const filePath = vscode.workspace.asRelativePath(doc.uri, false);
         const language = doc.languageId;
@@ -198,18 +317,73 @@ class LunaAssistantService {
             '\n' +
             code +
             '\n```';
-        const client = new yandexClient_1.YandexAiStudioClient({ apiKey, folderId: baseCfg.yandexFolderId || undefined });
+        if (!baseCfg.yandexFolderId) {
+            throw new Error('Не задан luna.assistant.yandexFolderId (это folderId каталога Yandex Cloud).');
+        }
+        const client = new aiStudioClient_1.YandexAIStudioClient({ apiKey, openaiProject: baseCfg.yandexFolderId });
+        const version = this.kb.getVersionForFolder(this.kb.getActiveFolder());
+        const vectorStoreId = this.context.globalState.get(`luna.assistant.vectorStoreId.${version}`);
+        if (!vectorStoreId) {
+            throw new Error('Vector Store для текущей версии базы знаний не найден. Сначала выполните “LuNA: Reindex Knowledge Base for Assistant”.');
+        }
         const answer = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'LuNA: Explain selection', cancellable: true }, async (_progress, token) => {
-            const signal = abortSignalFromCancellationToken(token);
-            return await client.completion(baseCfg.generationModelUri, [
-                { role: 'system', text: system },
-                { role: 'user', text: user }
-            ], 1200, 0.2, signal);
+            void _progress;
+            const tools = [
+                { type: 'file_search', vector_store_ids: [vectorStoreId], max_num_results: baseCfg.searchMaxResults || 6 }
+            ];
+            if (baseCfg.enableWebSearch)
+                tools.push({ type: 'web_search' });
+            const resp = await client.createResponse({
+                model: baseCfg.generationModelUri,
+                input: [{ role: 'user', content: [{ type: 'input_text', text: `${system}\n\n${user}` }] }],
+                tools,
+                tool_choice: 'auto'
+            });
+            const { text, sources } = extractAnswerAndSources(resp);
+            return formatAnswerWithSources(text, sources);
         });
         this.getOutput().appendLine(`--- Explain Selection: ${filePath} (${rangeStr}) ---`);
         this.getOutput().appendLine(answer.trim());
         this.getOutput().appendLine('');
         this.getOutput().show(true);
+    }
+    /**
+     * Called when LuNA KB version for a workspace folder changes.
+     * We drop all "tails" from the previous version: conversation state and vector store.
+     */
+    async handleVersionChange(folder, oldVersion, newVersion) {
+        // 1) Reset conversation context for this workspace.
+        const convKey = `luna.assistant.previousResponseId.${folder.uri.toString()}`;
+        await this.context.globalState.update(convKey, undefined);
+        // 2) Best-effort delete previous version vector store, so it can't be used by mistake.
+        const oldVsKey = `luna.assistant.vectorStoreId.${oldVersion}`;
+        const oldVsId = this.context.globalState.get(oldVsKey) || '';
+        if (oldVsId) {
+            try {
+                const baseCfg = (0, config_1.withDerivedDefaults)((0, config_1.getAssistantConfig)());
+                const apiKey = await (0, yandexClient_1.getApiKeyFromSecrets)(this.context);
+                if (apiKey && baseCfg.yandexFolderId) {
+                    const client = new aiStudioClient_1.YandexAIStudioClient({ apiKey, openaiProject: baseCfg.yandexFolderId });
+                    await client.deleteVectorStore(oldVsId);
+                }
+            }
+            catch (_a) {
+                // ignore
+            }
+            await this.context.globalState.update(oldVsKey, undefined);
+        }
+        // 3) Remove local caches for the old version (wiki + user-files).
+        try {
+            await fs.rm(this.kb.docsCacheRoot(oldVersion), { recursive: true, force: true });
+            await fs.rm(this.kb.userFilesCacheRoot(oldVersion), { recursive: true, force: true });
+        }
+        catch (_b) {
+            // ignore
+        }
+        // 4) Force reindex for the new version (don’t accidentally use stale ID).
+        const newVsKey = `luna.assistant.vectorStoreId.${newVersion}`;
+        await this.context.globalState.update(newVsKey, undefined);
+        vscode.window.showInformationMessage(`LuNA version changed: ${oldVersion} → ${newVersion}. Please run “LuNA: Reindex Knowledge Base for Assistant”.`);
     }
     async explainFile() {
         const editor = vscode.window.activeTextEditor;
@@ -228,6 +402,9 @@ class LunaAssistantService {
         if (!baseCfg.generationModelUri) {
             throw new Error('Не задан luna.assistant.generationModelUri. Пример: gpt://<folderId>/yandexgpt-lite/latest');
         }
+        if (!baseCfg.yandexFolderId) {
+            throw new Error('Не задан luna.assistant.yandexFolderId (это folderId каталога Yandex Cloud).');
+        }
         const filePath = vscode.workspace.asRelativePath(doc.uri, false);
         const language = doc.languageId;
         const code = clampTextByChars(doc.getText(), baseCfg.codeExplainMaxChars || 16000);
@@ -243,13 +420,30 @@ class LunaAssistantService {
             '\n' +
             code +
             '\n```';
-        const client = new yandexClient_1.YandexAiStudioClient({ apiKey, folderId: baseCfg.yandexFolderId || undefined });
+        if (!baseCfg.yandexFolderId) {
+            throw new Error('Не задан luna.assistant.yandexFolderId (это folderId каталога Yandex Cloud).');
+        }
+        const client = new aiStudioClient_1.YandexAIStudioClient({ apiKey, openaiProject: baseCfg.yandexFolderId });
+        const version = this.kb.getVersionForFolder(this.kb.getActiveFolder());
+        const vectorStoreId = this.context.globalState.get(`luna.assistant.vectorStoreId.${version}`);
+        if (!vectorStoreId) {
+            throw new Error('Vector Store для текущей версии базы знаний не найден. Сначала выполните “LuNA: Reindex Knowledge Base for Assistant”.');
+        }
         const answer = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'LuNA: Explain file', cancellable: true }, async (_progress, token) => {
-            const signal = abortSignalFromCancellationToken(token);
-            return await client.completion(baseCfg.generationModelUri, [
-                { role: 'system', text: system },
-                { role: 'user', text: user }
-            ], 1400, 0.2, signal);
+            void _progress;
+            const tools = [
+                { type: 'file_search', vector_store_ids: [vectorStoreId], max_num_results: baseCfg.searchMaxResults || 6 }
+            ];
+            if (baseCfg.enableWebSearch)
+                tools.push({ type: 'web_search' });
+            const resp = await client.createResponse({
+                model: baseCfg.generationModelUri,
+                input: [{ role: 'user', content: [{ type: 'input_text', text: `${system}\n\n${user}` }] }],
+                tools,
+                tool_choice: 'auto'
+            });
+            const { text, sources } = extractAnswerAndSources(resp);
+            return formatAnswerWithSources(text, sources);
         });
         this.getOutput().appendLine(`--- Explain File: ${filePath} ---`);
         this.getOutput().appendLine(answer.trim());
@@ -264,16 +458,74 @@ class LunaAssistantService {
     }
 }
 exports.LunaAssistantService = LunaAssistantService;
-function getWorkspaceRoot() {
-    var _a, _b;
-    return (_b = (_a = vscode.workspace.workspaceFolders) === null || _a === void 0 ? void 0 : _a[0]) === null || _b === void 0 ? void 0 : _b.uri.fsPath;
+function extractAnswerAndSources(resp) {
+    var _a;
+    const sources = [];
+    const texts = [];
+    const output = (resp === null || resp === void 0 ? void 0 : resp.output) || (resp === null || resp === void 0 ? void 0 : resp.output_items) || [];
+    for (const item of output) {
+        if ((item === null || item === void 0 ? void 0 : item.type) !== 'message')
+            continue;
+        const content = (item === null || item === void 0 ? void 0 : item.content) || [];
+        for (const part of content) {
+            if ((part === null || part === void 0 ? void 0 : part.type) === 'output_text') {
+                const t = String((part === null || part === void 0 ? void 0 : part.text) || '');
+                if (t)
+                    texts.push(t);
+                const anns = (part === null || part === void 0 ? void 0 : part.annotations) || [];
+                for (const a of anns) {
+                    // File citations usually provide filename, plus optional page/line.
+                    const file = (a === null || a === void 0 ? void 0 : a.filename) || ((_a = a === null || a === void 0 ? void 0 : a.file) === null || _a === void 0 ? void 0 : _a.filename) || (a === null || a === void 0 ? void 0 : a.file_name) || (a === null || a === void 0 ? void 0 : a.file_id) || undefined;
+                    const quote = (a === null || a === void 0 ? void 0 : a.quote) || (a === null || a === void 0 ? void 0 : a.text) || undefined;
+                    const page = typeof (a === null || a === void 0 ? void 0 : a.page_number) === 'number' ? a.page_number : typeof (a === null || a === void 0 ? void 0 : a.page) === 'number' ? a.page : undefined;
+                    const line = (a === null || a === void 0 ? void 0 : a.line) || (a === null || a === void 0 ? void 0 : a.location) || undefined;
+                    sources.push({ file, quote, page, line });
+                }
+            }
+        }
+    }
+    return { text: texts.join('').trim(), sources: dedupeSources(sources) };
 }
-function resolveIndexPath(context, folderUri, scope, relPath, version) {
-    const base = scope === 'workspace' ? folderUri.fsPath : context.globalStorageUri.fsPath;
-    const cleaned = String(relPath || 'assistant/index.json').replace(/\\/g, '/').replace(/^\/+/, '');
-    const dir = path.dirname(cleaned);
-    const file = path.basename(cleaned);
-    return path.join(base, dir, version, file);
+function dedupeSources(srcs) {
+    const seen = new Set();
+    const out = [];
+    for (const s of srcs) {
+        const key = JSON.stringify({ f: s.file || '', p: s.page || '', l: s.line || '', q: (s.quote || '').slice(0, 80) });
+        if (seen.has(key))
+            continue;
+        seen.add(key);
+        out.push(s);
+    }
+    return out;
+}
+function formatAnswerWithSources(answer, sources) {
+    const a = (answer || '').trim();
+    if (!(sources === null || sources === void 0 ? void 0 : sources.length))
+        return a;
+    const lines = [];
+    lines.push(a);
+    lines.push('');
+    lines.push('Источники:');
+    for (const s of sources.slice(0, 12)) {
+        const parts = [];
+        if (s.file)
+            parts.push(s.file);
+        if (typeof s.page === 'number')
+            parts.push(`стр. ${s.page}`);
+        if (s.line)
+            parts.push(String(s.line));
+        const head = parts.length ? parts.join(', ') : 'файл';
+        if (s.quote) {
+            const q = String(s.quote).replace(/\s+/g, ' ').trim();
+            lines.push(`- ${head}: “${q.slice(0, 220)}${q.length > 220 ? '…' : ''}”`);
+        }
+        else {
+            lines.push(`- ${head}`);
+        }
+    }
+    if (sources.length > 12)
+        lines.push(`- …и ещё ${sources.length - 12} источник(ов)`);
+    return lines.join('\n');
 }
 function isExplainSupported(doc) {
     const fsPath = doc.uri.fsPath.toLowerCase();

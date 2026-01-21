@@ -97,8 +97,24 @@ class KnowledgeBaseService {
             cancellationToken: token
         });
     }
+    /** Ensure user-managed files for version are cached locally under globalStorage. */
+    async syncUserFiles(version, progress, token) {
+        const objects = await this.storage.listObjects(version, 'user-files');
+        return await (0, sync_1.syncDocsFromCloud)({
+            context: this.context,
+            storage: this.storage,
+            version,
+            objects,
+            progress,
+            cancellationToken: token,
+            category: 'user-files'
+        });
+    }
     docsCacheRoot(version) {
         return vscode.Uri.joinPath(this.context.globalStorageUri, 'kb', version, 'docs').fsPath;
+    }
+    userFilesCacheRoot(version) {
+        return vscode.Uri.joinPath(this.context.globalStorageUri, 'kb', version, 'user-files').fsPath;
     }
     /** Download an object to a temp location and open in editor. */
     async openObject(target) {

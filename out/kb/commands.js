@@ -37,6 +37,23 @@ exports.registerKbCommands = registerKbCommands;
 const vscode = __importStar(require("vscode"));
 function registerKbCommands(params) {
     const { context, kb, storage, tree, projects, statusBar } = params;
+    /**
+     * Commands can be invoked from TreeView context menus.
+     * In that case VS Code passes the clicked tree node object as the first argument.
+     */
+    function resolveVersionArg(arg) {
+        if (!arg)
+            return undefined;
+        if (typeof arg === 'string')
+            return arg;
+        // Tree nodes
+        const anyArg = arg;
+        if (typeof anyArg.version === 'string')
+            return anyArg.version;
+        if (typeof anyArg.name === 'string')
+            return anyArg.name;
+        return undefined;
+    }
     async function updateStatus() {
         const folder = kb.getActiveFolder();
         const v = kb.getVersionForFolder(folder);
@@ -75,6 +92,13 @@ function registerKbCommands(params) {
     }), vscode.commands.registerCommand('luna.kb.uploadDocs', async (version) => {
         const folder = kb.getActiveFolder();
         const v = version || kb.getVersionForFolder(folder);
+        // Wiki is treated as immutable for regular users.
+        const cfg = vscode.workspace.getConfiguration('luna');
+        const wikiReadOnly = cfg.get('kb.wikiReadOnly', true);
+        if (wikiReadOnly) {
+            vscode.window.showWarningMessage('LuNA wiki docs are read-only in this extension build. Use “LuNA: Add User Files to Assistant” to add your own documents.');
+            return;
+        }
         const uris = await vscode.window.showOpenDialog({ title: 'Upload docs files', canSelectMany: true, canSelectFiles: true });
         if (!(uris === null || uris === void 0 ? void 0 : uris.length))
             return;
@@ -97,7 +121,18 @@ function registerKbCommands(params) {
     }), vscode.commands.registerCommand('luna.kb.uploadFolder', async (version) => {
         const folder = kb.getActiveFolder();
         const v = version || kb.getVersionForFolder(folder);
-        const picked = await vscode.window.showOpenDialog({ title: 'Select folder to upload (docs)', canSelectFolders: true, canSelectFiles: false, canSelectMany: false });
+        const cfg = vscode.workspace.getConfiguration('luna');
+        const wikiReadOnly = cfg.get('kb.wikiReadOnly', true);
+        if (wikiReadOnly) {
+            vscode.window.showWarningMessage('LuNA wiki docs are read-only in this extension build. Use “LuNA: Add User Files to Assistant” to add your own documents.');
+            return;
+        }
+        const picked = await vscode.window.showOpenDialog({
+            title: 'Select folder to upload (docs)',
+            canSelectFolders: true,
+            canSelectFiles: false,
+            canSelectMany: false
+        });
         if (!(picked === null || picked === void 0 ? void 0 : picked.length))
             return;
         const base = picked[0];
@@ -111,6 +146,58 @@ function registerKbCommands(params) {
             await kb.uploadFiles(v, 'docs', files, base);
         });
         tree.refresh();
+    }), 
+    // User-managed files for assistant RAG (stored in cloud under .../<version>/user-files/)
+    vscode.commands.registerCommand('luna.kb.uploadUserFiles', async (versionArg) => {
+        const folder = kb.getActiveFolder();
+        const v = resolveVersionArg(versionArg) || kb.getVersionForFolder(folder);
+        const uris = await vscode.window.showOpenDialog({
+            title: 'Add user files for assistant (indexed)',
+            canSelectMany: true,
+            canSelectFiles: true,
+            filters: { Documents: ['md', 'markdown', 'txt', 'pdf'], All: ['*'] }
+        });
+        if (!(uris === null || uris === void 0 ? void 0 : uris.length))
+            return;
+        await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `LuNA KB: uploading to ${v}/user-files`, cancellable: true }, async (progress) => {
+            progress.report({ message: `Uploading ${uris.length} file(s)...` });
+            await kb.uploadFiles(v, 'user-files', uris);
+        });
+        tree.refresh();
+        // Full reindex for reliability.
+        void vscode.commands.executeCommand('luna.assistant.reindexWiki');
+    }), vscode.commands.registerCommand('luna.kb.listUserFiles', async (versionArg) => {
+        const folder = kb.getActiveFolder();
+        const v = resolveVersionArg(versionArg) || kb.getVersionForFolder(folder);
+        const objects = await storage.listObjects(v, 'user-files');
+        if (!objects.length) {
+            vscode.window.showInformationMessage(`No user files for version ${v}.`);
+            return;
+        }
+        const picked = await vscode.window.showQuickPick(objects.map(o => ({
+            label: storage.relativeName(v, 'user-files', o.key),
+            description: `${Math.round((o.size || 0) / 1024)} KB`,
+            detail: o.key,
+            obj: o
+        })), { title: `User files (${v})`, canPickMany: true });
+        if (!picked || (Array.isArray(picked) && picked.length === 0))
+            return;
+        const arr = Array.isArray(picked) ? picked : [picked];
+        const action = await vscode.window.showQuickPick(['Open', 'Delete'], { title: `Action for ${arr.length} file(s)` });
+        if (!action)
+            return;
+        if (action === 'Open') {
+            await kb.openObject({ version: v, category: 'user-files', key: arr[0].obj.key });
+            return;
+        }
+        const ok = await vscode.window.showWarningMessage(`Delete ${arr.length} user file(s) from cloud?`, { modal: true }, 'Delete');
+        if (ok !== 'Delete')
+            return;
+        for (const it of arr) {
+            await kb.deleteObject(it.obj.key);
+        }
+        tree.refresh();
+        void vscode.commands.executeCommand('luna.assistant.reindexWiki');
     }), vscode.commands.registerCommand('luna.kb.importThesisPdf', async (version) => {
         const folder = kb.getActiveFolder();
         const v = version || kb.getVersionForFolder(folder);
@@ -130,11 +217,19 @@ function registerKbCommands(params) {
     }), vscode.commands.registerCommand('luna.kb.deleteObject', async (node) => {
         if (!node || node.kind !== 'object')
             return;
+        if (node.category === 'docs') {
+            vscode.window.showWarningMessage('LuNA wiki docs are read-only and cannot be deleted from this extension.');
+            return;
+        }
         const ok = await vscode.window.showWarningMessage(`Delete from cloud?\n${node.object.key}`, { modal: true }, 'Delete');
         if (ok !== 'Delete')
             return;
         await kb.deleteObject(node.object.key);
         tree.refresh();
+        if (node.category === 'user-files') {
+            // Full reindex so removed content is not used.
+            void vscode.commands.executeCommand('luna.assistant.reindexWiki');
+        }
     }), vscode.commands.registerCommand('luna.kb.openObject', async (node) => {
         if (!node || node.kind !== 'object')
             return;

@@ -31,6 +31,8 @@
     "onCommand:luna.kb.uploadDocs",
     "onCommand:luna.kb.uploadRaw",
     "onCommand:luna.kb.uploadFolder",
+    "onCommand:luna.kb.uploadUserFiles",
+    "onCommand:luna.kb.listUserFiles",
     "onCommand:luna.kb.importThesisPdf",
     "onCommand:luna.kb.deleteObject",
     "onCommand:luna.kb.openObject",
@@ -145,6 +147,14 @@
         "title": "LuNA KB: Upload Docs Folder"
       },
       {
+        "command": "luna.kb.uploadUserFiles",
+        "title": "LuNA: Add User Files to Assistant"
+      },
+      {
+        "command": "luna.kb.listUserFiles",
+        "title": "LuNA: Manage User Files for Assistant"
+      },
+      {
         "command": "luna.kb.importThesisPdf",
         "title": "LuNA KB: Import Thesis PDF"
       },
@@ -192,7 +202,7 @@
         },
         {
           "command": "luna.kb.uploadDocs",
-          "when": "view == lunaKnowledgeBaseView",
+          "when": "view == lunaKnowledgeBaseView && config.luna.kb.wikiReadOnly == false",
           "group": "navigation@4"
         },
         {
@@ -201,20 +211,30 @@
           "group": "navigation@5"
         },
         {
-          "command": "luna.kb.importThesisPdf",
+          "command": "luna.kb.uploadUserFiles",
           "when": "view == lunaKnowledgeBaseView",
           "group": "navigation@6"
+        },
+        {
+          "command": "luna.kb.listUserFiles",
+          "when": "view == lunaKnowledgeBaseView",
+          "group": "navigation@7"
+        },
+        {
+          "command": "luna.kb.importThesisPdf",
+          "when": "view == lunaKnowledgeBaseView",
+          "group": "navigation@8"
         }
       ],
       "view/item/context": [
         {
           "command": "luna.kb.deleteObject",
-          "when": "view == lunaKnowledgeBaseView && viewItem == lunaKbObject",
+          "when": "view == lunaKnowledgeBaseView && (viewItem == lunaKbObject || viewItem == lunaKbObjectUser)",
           "group": "inline@2"
         },
         {
           "command": "luna.kb.openObject",
-          "when": "view == lunaKnowledgeBaseView && viewItem == lunaKbObject",
+          "when": "view == lunaKnowledgeBaseView && (viewItem == lunaKbObject || viewItem == lunaKbObjectUser || viewItem == lunaKbObjectDocs)",
           "group": "inline@1"
         },
         {
@@ -231,24 +251,58 @@
           "default": false,
           "description": "Включить LuNA AI Assistant (RAG по базе знаний). Если выключено — плагин работает как раньше, без сети и без ИИ."
         },
-        "luna.assistant.indexStorageScope": {
-          "type": "string",
-          "enum": [
-            "global",
-            "workspace"
-          ],
-          "default": "global",
-          "description": "Где хранить локальный индекс ассистента (по умолчанию в глобальном хранилище расширения, чтобы не дублировать в каждом проекте)."
-        },
-        "luna.assistant.indexStoragePath": {
-          "type": "string",
-          "default": "assistant/index.json",
-          "description": "Путь к файлу индекса. Если scope=global, путь относительно globalStorage расширения. Если scope=workspace — относительно корня workspace. На диск сохранится отдельный файл на каждую версию базы знаний."
-        },
         "luna.assistant.yandexFolderId": {
           "type": "string",
           "default": "",
           "description": "Folder ID в Yandex Cloud. Нужен, чтобы сформировать modelUri для эмбеддингов/генерации (например emb://<folder>/text-search-doc/latest)."
+        },
+        "luna.assistant.vectorStoreId": {
+          "type": "string",
+          "default": "",
+          "description": "(Опционально) ID существующего Vector Store в AI Studio. Если пусто — расширение создаст Vector Store для каждой версии базы знаний и будет хранить id во внутреннем состоянии."
+        },
+        "luna.assistant.vectorStoreNamePrefix": {
+          "type": "string",
+          "default": "luna-kb",
+          "description": "Префикс имени auto-created Vector Store. Итоговое имя: <prefix>-<kbVersion>."
+        },
+        "luna.assistant.recreateVectorStoreOnReindex": {
+          "type": "boolean",
+          "default": true,
+          "description": "Удалять и пересоздавать Vector Store при каждом reindex (чтобы не копились дубликаты файлов)."
+        },
+        "luna.assistant.vectorStore.ttlDays": {
+          "type": "number",
+          "default": 365,
+          "minimum": 1,
+          "maximum": 3650,
+          "description": "TTL для Vector Store (обязательное поле API): сколько дней хранить после last_active_at."
+        },
+        "luna.assistant.enableWebSearch": {
+          "type": "boolean",
+          "default": false,
+          "description": "Разрешить инструмент web_search (поиск в интернете) в дополнение к file_search по базе знаний."
+        },
+        "luna.assistant.search.maxResults": {
+          "type": "number",
+          "default": 6,
+          "minimum": 1,
+          "maximum": 20,
+          "description": "Сколько результатов из Vector Store (file_search) подмешивать в контекст."
+        },
+        "luna.assistant.search.chunk.maxTokens": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 2048,
+          "description": "Макс. размер чанка в токенах для индекса. 0 = использовать дефолты на стороне Yandex Cloud."
+        },
+        "luna.assistant.search.chunk.overlapTokens": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 1024,
+          "description": "Перекрытие чанков в токенах. 0 = использовать дефолты."
         },
         "luna.assistant.docEmbeddingModelUri": {
           "type": "string",
@@ -265,20 +319,6 @@
           "default": "",
           "description": "Model URI для генерации ответа. Пример: gpt://<folder_ID>/yandexgpt/latest (уточните в AI Studio)."
         },
-        "luna.assistant.topK": {
-          "type": "number",
-          "default": 5,
-          "minimum": 1,
-          "maximum": 20,
-          "description": "Сколько фрагментов базы знаний подмешивать в контекст RAG (Top-K по похожести)."
-        },
-        "luna.assistant.chunkChars": {
-          "type": "number",
-          "default": 1800,
-          "minimum": 300,
-          "maximum": 8000,
-          "description": "Размер чанка (примерно, в символах) при разбиении базы знаний на фрагменты для индекса."
-        },
         "luna.assistant.codeExplain.maxChars": {
           "type": "number",
           "default": 16000,
@@ -290,6 +330,11 @@
           "type": "boolean",
           "default": true,
           "description": "Включить облачную базу знаний LuNA (Yandex Object Storage)."
+        },
+        "luna.kb.wikiReadOnly": {
+          "type": "boolean",
+          "default": true,
+          "description": "Считать wiki (docs/) неизменяемой: скрыть команды загрузки в docs/ и запретить удаление из docs/ через UI. Пользовательские документы добавляются в user-files/."
         },
         "luna.kb.storage.bucket": {
           "type": "string",

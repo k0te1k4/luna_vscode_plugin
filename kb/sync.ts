@@ -1,12 +1,12 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { KnowledgeBaseStorage, KbObject } from './storage';
+import { KnowledgeBaseStorage, KbObject, KbCategory } from './storage';
 
 export type SyncResult = {
   downloaded: number;
   skipped: number;
   removed: number;
-  cacheDocsRoot: vscode.Uri;
+  cacheRoot: vscode.Uri;
 };
 
 type ManifestEntry = {
@@ -21,12 +21,13 @@ function cacheRoot(context: vscode.ExtensionContext, version: string): vscode.Ur
   return vscode.Uri.joinPath(context.globalStorageUri, 'kb', version);
 }
 
-function docsRoot(context: vscode.ExtensionContext, version: string): vscode.Uri {
-  return vscode.Uri.joinPath(cacheRoot(context, version), 'docs');
+function categoryRoot(context: vscode.ExtensionContext, version: string, category: KbCategory): vscode.Uri {
+  return vscode.Uri.joinPath(cacheRoot(context, version), category);
 }
 
-function manifestUri(context: vscode.ExtensionContext, version: string): vscode.Uri {
-  return vscode.Uri.joinPath(cacheRoot(context, version), 'manifest.json');
+function manifestUri(context: vscode.ExtensionContext, version: string, category: KbCategory): vscode.Uri {
+  // keep per-category manifests to avoid collisions
+  return vscode.Uri.joinPath(cacheRoot(context, version), `manifest.${category}.json`);
 }
 
 async function readManifest(uri: vscode.Uri): Promise<Manifest> {
@@ -62,14 +63,16 @@ export async function syncDocsFromCloud(params: {
   objects: KbObject[];
   progress?: vscode.Progress<{ message?: string; increment?: number }>;
   cancellationToken?: vscode.CancellationToken;
+  category?: KbCategory;
 }): Promise<SyncResult> {
   const { context, storage, version, objects } = params;
-  const mUri = manifestUri(context, version);
+  const category: KbCategory = (params.category || 'docs') as any;
+  const mUri = manifestUri(context, version, category);
   const manifest = await readManifest(mUri);
 
   // Ensure the docs cache root exists even if there are no objects in the cloud yet.
   // This prevents downstream code (indexer) from failing with ENOENT on scandir.
-  await vscode.workspace.fs.createDirectory(docsRoot(context, version));
+  await vscode.workspace.fs.createDirectory(categoryRoot(context, version, category));
 
   const currentKeys = new Set(objects.map(o => o.key));
   let downloaded = 0;
@@ -79,6 +82,16 @@ export async function syncDocsFromCloud(params: {
   // remove stale files from cache
   for (const oldKey of Object.keys(manifest)) {
     if (!currentKeys.has(oldKey)) {
+      // Best-effort remove the cached file from disk as well.
+      // Previously we only removed it from the manifest, leaving stale files on disk.
+      // That could cause reindex to still pick up documents that were deleted from Object Storage.
+      try {
+        const rel = sanitizeRel(storage.relativeName(version, category, oldKey));
+        const target = vscode.Uri.joinPath(categoryRoot(context, version, category), ...rel.split('/'));
+        await vscode.workspace.fs.delete(target, { recursive: false, useTrash: false } as any);
+      } catch {
+        // ignore
+      }
       delete manifest[oldKey];
       removed++;
     }
@@ -94,12 +107,15 @@ export async function syncDocsFromCloud(params: {
     const same = old && old.etag && obj.etag && old.etag === obj.etag && old.size === obj.size;
     if (same) {
       skipped++;
-      params.progress?.report({ message: `KB cache: up-to-date (${storage.relativeName(version, 'docs', obj.key)})`, increment: (1 / total) * 100 });
+      params.progress?.report({
+        message: `KB cache: up-to-date (${storage.relativeName(version, category, obj.key)})`,
+        increment: (1 / total) * 100
+      });
       continue;
     }
 
-    const rel = sanitizeRel(storage.relativeName(version, 'docs', obj.key));
-    const target = vscode.Uri.joinPath(docsRoot(context, version), ...rel.split('/'));
+    const rel = sanitizeRel(storage.relativeName(version, category, obj.key));
+    const target = vscode.Uri.joinPath(categoryRoot(context, version, category), ...rel.split('/'));
     await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(target, '..'));
     params.progress?.report({ message: `KB cache: downloading ${rel}`, increment: (1 / total) * 100 });
     await storage.downloadToFile(obj.key, target);
@@ -117,6 +133,6 @@ export async function syncDocsFromCloud(params: {
     downloaded,
     skipped,
     removed,
-    cacheDocsRoot: docsRoot(context, version)
+    cacheRoot: categoryRoot(context, version, category)
   };
 }

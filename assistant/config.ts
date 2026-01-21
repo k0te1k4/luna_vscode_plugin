@@ -2,24 +2,34 @@ import * as vscode from 'vscode';
 
 export type AssistantConfig = {
   enabled: boolean;
-  /**
-   * Where to store local index + cached docs.
-   * - global: extension globalStorage (recommended)
-   * - workspace: inside workspace folder
-   */
-  indexStorageScope: 'global' | 'workspace';
-
-  /**
-   * Index file path. If indexStorageScope='workspace' then it is relative to workspace root.
-   * If indexStorageScope='global' then it is relative to extension globalStorage.
-   */
-  indexStoragePath: string;
+  /** Folder ID in Yandex Cloud AI Studio */
   yandexFolderId: string;
+
+  /** Optional: existing Vector Store ID. If empty, plugin will auto-create per KB version and persist it. */
+  vectorStoreId: string;
+
+  /** Prefix for auto-created vector store names. Actual name will be `${prefix}-${kbVersion}` */
+  vectorStoreNamePrefix: string;
+
+  /** Recreate (delete + create) vector store on each reindex to avoid duplicates. */
+  recreateVectorStoreOnReindex: boolean;
+
+  /** Vector store expiration policy (required by API): days since last_active_at. */
+  vectorStoreTtlDays: number;
+
+  /** Allow the model to use web_search tool in addition to file_search. */
+  enableWebSearch: boolean;
+
+  /** Max results for SearchIndexTool (RAG). */
+  searchMaxResults: number;
+
+  /** Chunking settings (tokens). 0 means "use server defaults". */
+  searchChunkMaxTokens: number;
+  searchChunkOverlapTokens: number;
+
   docEmbeddingModelUri: string;
   queryEmbeddingModelUri: string;
   generationModelUri: string;
-  topK: number;
-  chunkChars: number;
   codeExplainMaxChars: number;
 };
 
@@ -27,14 +37,18 @@ export function getAssistantConfig(): AssistantConfig {
   const cfg = vscode.workspace.getConfiguration('luna');
   return {
     enabled: cfg.get<boolean>('assistant.enabled', false),
-    indexStorageScope: cfg.get<'global' | 'workspace'>('assistant.indexStorageScope', 'global'),
-    indexStoragePath: cfg.get<string>('assistant.indexStoragePath', 'assistant/index.json'),
     yandexFolderId: cfg.get<string>('assistant.yandexFolderId', ''),
+    vectorStoreId: cfg.get<string>('assistant.vectorStoreId', ''),
+    vectorStoreNamePrefix: cfg.get<string>('assistant.vectorStoreNamePrefix', 'luna-kb'),
+    recreateVectorStoreOnReindex: cfg.get<boolean>('assistant.recreateVectorStoreOnReindex', true),
+    vectorStoreTtlDays: clamp(cfg.get<number>('assistant.vectorStore.ttlDays', 365), 1, 3650),
+    enableWebSearch: cfg.get<boolean>('assistant.enableWebSearch', false),
+    searchMaxResults: clamp(cfg.get<number>('assistant.search.maxResults', 6), 1, 20),
+    searchChunkMaxTokens: clamp(cfg.get<number>('assistant.search.chunk.maxTokens', 0), 0, 2048),
+    searchChunkOverlapTokens: clamp(cfg.get<number>('assistant.search.chunk.overlapTokens', 0), 0, 1024),
     docEmbeddingModelUri: cfg.get<string>('assistant.docEmbeddingModelUri', ''),
     queryEmbeddingModelUri: cfg.get<string>('assistant.queryEmbeddingModelUri', ''),
     generationModelUri: cfg.get<string>('assistant.generationModelUri', ''),
-    topK: clamp(cfg.get<number>('assistant.topK', 5), 1, 20),
-    chunkChars: clamp(cfg.get<number>('assistant.chunkChars', 1800), 300, 8000),
     codeExplainMaxChars: clamp(cfg.get<number>('assistant.codeExplain.maxChars', 16000), 2000, 200000)
   };
 }

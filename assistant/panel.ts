@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 
 export type AssistantPanelCallbacks = {
-  onAsk: (question: string) => Promise<string>;
+  onAsk: (question: string, onDelta?: (deltaText: string) => void) => Promise<string>;
   onReindex: () => Promise<void>;
 };
 
@@ -32,13 +32,18 @@ export class AssistantPanel {
     const webview = this.panel.webview;
     webview.html = getHtml();
 
-    webview.onDidReceiveMessage(async msg => {
+    webview.onDidReceiveMessage(async (msg: any) => {
       try {
         if (msg?.type === 'ask') {
           const q = String(msg.question ?? '').trim();
           if (!q) return;
-          const a = await this.cb.onAsk(q);
-          webview.postMessage({ type: 'answer', answer: a });
+          const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+          // Tell UI to create a placeholder message that we'll stream into.
+          webview.postMessage({ type: 'answerStart', requestId });
+          const a = await this.cb.onAsk(q, deltaText => {
+            webview.postMessage({ type: 'answerDelta', requestId, delta: deltaText });
+          });
+          webview.postMessage({ type: 'answerDone', requestId, answer: a });
         } else if (msg?.type === 'reindex') {
           await this.cb.onReindex();
           webview.postMessage({ type: 'system', text: '✅ Индекс базы знаний обновлён.' });
@@ -94,7 +99,10 @@ function getHtml(): string {
       p.textContent = text;
       log.appendChild(p);
       log.scrollTop = log.scrollHeight;
+      return p;
     }
+
+    const streaming = new Map();
 
     function ask() {
       const question = (q.value || '').trim();
@@ -113,7 +121,28 @@ function getHtml(): string {
 
     window.addEventListener('message', (event) => {
       const msg = event.data;
-      if (msg?.type === 'answer') add('Ассистент: ' + msg.answer);
+      if (msg?.type === 'answerStart') {
+        const el = add('Ассистент: ', '');
+        streaming.set(msg.requestId, { el, text: '' });
+      }
+      if (msg?.type === 'answerDelta') {
+        const s = streaming.get(msg.requestId);
+        if (s) {
+          s.text += (msg.delta || '');
+          s.el.textContent = 'Ассистент: ' + s.text;
+          log.scrollTop = log.scrollHeight;
+        }
+      }
+      if (msg?.type === 'answerDone') {
+        const s = streaming.get(msg.requestId);
+        if (s) {
+          const finalText = (msg.answer || '').trim();
+          s.el.textContent = 'Ассистент: ' + finalText;
+          streaming.delete(msg.requestId);
+        } else {
+          add('Ассистент: ' + (msg.answer||''));
+        }
+      }
       if (msg?.type === 'system') add(msg.text);
       if (msg?.type === 'error') add('Ошибка: ' + msg.text, 'err');
     });

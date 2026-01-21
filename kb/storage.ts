@@ -24,7 +24,7 @@ export type KbVersion = {
   name: string;
 };
 
-export type KbCategory = 'docs' | 'raw';
+export type KbCategory = 'docs' | 'raw' | 'user-files';
 
 function joinKey(...parts: string[]): string {
   const s = parts

@@ -40,14 +40,18 @@ function getAssistantConfig() {
     const cfg = vscode.workspace.getConfiguration('luna');
     return {
         enabled: cfg.get('assistant.enabled', false),
-        indexStorageScope: cfg.get('assistant.indexStorageScope', 'global'),
-        indexStoragePath: cfg.get('assistant.indexStoragePath', 'assistant/index.json'),
         yandexFolderId: cfg.get('assistant.yandexFolderId', ''),
+        vectorStoreId: cfg.get('assistant.vectorStoreId', ''),
+        vectorStoreNamePrefix: cfg.get('assistant.vectorStoreNamePrefix', 'luna-kb'),
+        recreateVectorStoreOnReindex: cfg.get('assistant.recreateVectorStoreOnReindex', true),
+        vectorStoreTtlDays: clamp(cfg.get('assistant.vectorStore.ttlDays', 365), 1, 3650),
+        enableWebSearch: cfg.get('assistant.enableWebSearch', false),
+        searchMaxResults: clamp(cfg.get('assistant.search.maxResults', 6), 1, 20),
+        searchChunkMaxTokens: clamp(cfg.get('assistant.search.chunk.maxTokens', 0), 0, 2048),
+        searchChunkOverlapTokens: clamp(cfg.get('assistant.search.chunk.overlapTokens', 0), 0, 1024),
         docEmbeddingModelUri: cfg.get('assistant.docEmbeddingModelUri', ''),
         queryEmbeddingModelUri: cfg.get('assistant.queryEmbeddingModelUri', ''),
         generationModelUri: cfg.get('assistant.generationModelUri', ''),
-        topK: clamp(cfg.get('assistant.topK', 5), 1, 20),
-        chunkChars: clamp(cfg.get('assistant.chunkChars', 1800), 300, 8000),
         codeExplainMaxChars: clamp(cfg.get('assistant.codeExplain.maxChars', 16000), 2000, 200000)
     };
 }

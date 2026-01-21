@@ -72,16 +72,25 @@ class KnowledgeBaseTreeProvider {
                 return item;
             }
             case 'category': {
-                const label = element.category === 'docs' ? 'Docs (indexed)' : 'Raw';
+                const label = element.category === 'docs'
+                    ? 'Docs (wiki, indexed)'
+                    : element.category === 'user-files'
+                        ? 'User files (indexed)'
+                        : 'Raw';
                 const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.Collapsed);
                 item.contextValue = 'lunaKbCategory';
-                item.iconPath = new vscode.ThemeIcon(element.category === 'docs' ? 'book' : 'file-binary');
+                item.iconPath = new vscode.ThemeIcon(element.category === 'docs' ? 'book' : element.category === 'user-files' ? 'files' : 'file-binary');
                 return item;
             }
             case 'object': {
                 const rel = this.storage.relativeName(element.version, element.category, element.object.key);
                 const item = new vscode.TreeItem(rel, vscode.TreeItemCollapsibleState.None);
-                item.contextValue = 'lunaKbObject';
+                item.contextValue =
+                    element.category === 'docs'
+                        ? 'lunaKbObjectDocs'
+                        : element.category === 'user-files'
+                            ? 'lunaKbObjectUser'
+                            : 'lunaKbObject';
                 item.iconPath = new vscode.ThemeIcon('file');
                 item.description = `${Math.round((element.object.size || 0) / 1024)} KB`;
                 item.tooltip = `${element.object.key}\n${((_a = element.object.lastModified) === null || _a === void 0 ? void 0 : _a.toISOString()) || ''}`;
@@ -114,6 +123,7 @@ class KnowledgeBaseTreeProvider {
         if (element.kind === 'version') {
             return [
                 { kind: 'category', version: element.version, category: 'docs' },
+                { kind: 'category', version: element.version, category: 'user-files' },
                 { kind: 'category', version: element.version, category: 'raw' }
             ];
         }

@@ -39,11 +39,12 @@ const path = __importStar(require("path"));
 function cacheRoot(context, version) {
     return vscode.Uri.joinPath(context.globalStorageUri, 'kb', version);
 }
-function docsRoot(context, version) {
-    return vscode.Uri.joinPath(cacheRoot(context, version), 'docs');
+function categoryRoot(context, version, category) {
+    return vscode.Uri.joinPath(cacheRoot(context, version), category);
 }
-function manifestUri(context, version) {
-    return vscode.Uri.joinPath(cacheRoot(context, version), 'manifest.json');
+function manifestUri(context, version, category) {
+    // keep per-category manifests to avoid collisions
+    return vscode.Uri.joinPath(cacheRoot(context, version), `manifest.${category}.json`);
 }
 async function readManifest(uri) {
     try {
@@ -73,11 +74,12 @@ function sanitizeRel(rel) {
 async function syncDocsFromCloud(params) {
     var _a, _b, _c;
     const { context, storage, version, objects } = params;
-    const mUri = manifestUri(context, version);
+    const category = (params.category || 'docs');
+    const mUri = manifestUri(context, version, category);
     const manifest = await readManifest(mUri);
     // Ensure the docs cache root exists even if there are no objects in the cloud yet.
     // This prevents downstream code (indexer) from failing with ENOENT on scandir.
-    await vscode.workspace.fs.createDirectory(docsRoot(context, version));
+    await vscode.workspace.fs.createDirectory(categoryRoot(context, version, category));
     const currentKeys = new Set(objects.map(o => o.key));
     let downloaded = 0;
     let skipped = 0;
@@ -85,6 +87,17 @@ async function syncDocsFromCloud(params) {
     // remove stale files from cache
     for (const oldKey of Object.keys(manifest)) {
         if (!currentKeys.has(oldKey)) {
+            // Best-effort remove the cached file from disk as well.
+            // Previously we only removed it from the manifest, leaving stale files on disk.
+            // That could cause reindex to still pick up documents that were deleted from Object Storage.
+            try {
+                const rel = sanitizeRel(storage.relativeName(version, category, oldKey));
+                const target = vscode.Uri.joinPath(categoryRoot(context, version, category), ...rel.split('/'));
+                await vscode.workspace.fs.delete(target, { recursive: false, useTrash: false });
+            }
+            catch (_d) {
+                // ignore
+            }
             delete manifest[oldKey];
             removed++;
         }
@@ -99,11 +112,14 @@ async function syncDocsFromCloud(params) {
         const same = old && old.etag && obj.etag && old.etag === obj.etag && old.size === obj.size;
         if (same) {
             skipped++;
-            (_b = params.progress) === null || _b === void 0 ? void 0 : _b.report({ message: `KB cache: up-to-date (${storage.relativeName(version, 'docs', obj.key)})`, increment: (1 / total) * 100 });
+            (_b = params.progress) === null || _b === void 0 ? void 0 : _b.report({
+                message: `KB cache: up-to-date (${storage.relativeName(version, category, obj.key)})`,
+                increment: (1 / total) * 100
+            });
             continue;
         }
-        const rel = sanitizeRel(storage.relativeName(version, 'docs', obj.key));
-        const target = vscode.Uri.joinPath(docsRoot(context, version), ...rel.split('/'));
+        const rel = sanitizeRel(storage.relativeName(version, category, obj.key));
+        const target = vscode.Uri.joinPath(categoryRoot(context, version, category), ...rel.split('/'));
         await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(target, '..'));
         (_c = params.progress) === null || _c === void 0 ? void 0 : _c.report({ message: `KB cache: downloading ${rel}`, increment: (1 / total) * 100 });
         await storage.downloadToFile(obj.key, target);
@@ -119,7 +135,7 @@ async function syncDocsFromCloud(params) {
         downloaded,
         skipped,
         removed,
-        cacheDocsRoot: docsRoot(context, version)
+        cacheRoot: categoryRoot(context, version, category)
     };
 }
 //# sourceMappingURL=sync.js.map

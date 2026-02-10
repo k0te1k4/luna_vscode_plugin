@@ -131,7 +131,8 @@ function activate(context) {
     vscode.commands.registerCommand('luna.assistant.explainSelection', async () => {
         var _a;
         try {
-            await assistant.explainSelection();
+            panel.show();
+            await panel.runAsk('Объясни, что делает код в выделенном фрагменте.');
         }
         catch (err) {
             vscode.window.showErrorMessage((_a = err === null || err === void 0 ? void 0 : err.message) !== null && _a !== void 0 ? _a : String(err));
@@ -141,7 +142,8 @@ function activate(context) {
     vscode.commands.registerCommand('luna.assistant.explainFile', async () => {
         var _a;
         try {
-            await assistant.explainFile();
+            panel.show();
+            await panel.runAsk('Объясни, что делает код в текущем файле.');
         }
         catch (err) {
             vscode.window.showErrorMessage((_a = err === null || err === void 0 ? void 0 : err.message) !== null && _a !== void 0 ? _a : String(err));

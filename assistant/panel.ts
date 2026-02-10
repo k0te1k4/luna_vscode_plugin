@@ -53,6 +53,33 @@ export class AssistantPanel {
       }
     });
   }
+
+  /**
+   * Run an "ask" from the extension side (e.g. from a command), but render the result inside the chat panel.
+   */
+  async runAsk(question: string): Promise<void> {
+    const q = String(question ?? '').trim();
+    if (!q) return;
+
+    if (!this.panel) this.show();
+    if (!this.panel) return;
+
+    const webview = this.panel.webview;
+
+    // Show the user's message in the chat.
+    webview.postMessage({ type: 'user', text: 'Вы: ' + q });
+
+    const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    webview.postMessage({ type: 'answerStart', requestId });
+    try {
+      const a = await this.cb.onAsk(q, deltaText => {
+        webview.postMessage({ type: 'answerDelta', requestId, delta: deltaText });
+      });
+      webview.postMessage({ type: 'answerDone', requestId, answer: a });
+    } catch (e: any) {
+      webview.postMessage({ type: 'error', text: e?.message ?? String(e) });
+    }
+  }
 }
 
 function getHtml(): string {
@@ -121,6 +148,7 @@ function getHtml(): string {
 
     window.addEventListener('message', (event) => {
       const msg = event.data;
+      if (msg?.type === 'user') add(msg.text, 'me');
       if (msg?.type === 'answerStart') {
         const el = add('Ассистент: ', '');
         streaming.set(msg.requestId, { el, text: '' });
@@ -143,11 +171,12 @@ function getHtml(): string {
           add('Ассистент: ' + (msg.answer||''));
         }
       }
+      if (msg?.type === 'user') add(msg.text, 'me');
       if (msg?.type === 'system') add(msg.text);
       if (msg?.type === 'error') add('Ошибка: ' + msg.text, 'err');
     });
 
-    add('Подсказка: если ассистент выключен, включите настройку luna.assistant.enabled и задайте API key командой “LuNA: Set Yandex API Key”.');
+    add('Подсказка: можно писать “в текущем файле/в открытой программе/в редакторе” — ассистент сам приложит код из активного редактора. Если ассистент выключен, включите настройку luna.assistant.enabled и задайте API key командой “LuNA: Set Yandex API Key”.');
   </script>
 </body>
 </html>`;

@@ -52,7 +52,8 @@ function getAssistantConfig() {
         docEmbeddingModelUri: cfg.get('assistant.docEmbeddingModelUri', ''),
         queryEmbeddingModelUri: cfg.get('assistant.queryEmbeddingModelUri', ''),
         generationModelUri: cfg.get('assistant.generationModelUri', ''),
-        codeExplainMaxChars: clamp(cfg.get('assistant.codeExplain.maxChars', 16000), 2000, 200000)
+        codeExplainMaxChars: clamp(cfg.get('assistant.codeExplain.maxChars', 16000), 2000, 200000),
+        editorContextMaxChars: clamp(cfg.get('assistant.editorContext.maxChars', 20000), 2000, 400000)
     };
 }
 function clamp(n, lo, hi) {

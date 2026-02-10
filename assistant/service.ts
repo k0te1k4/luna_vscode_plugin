@@ -37,8 +37,21 @@ async function deleteFilesBestEffort(client: YandexAIStudioClient, fileIds: stri
 
 export class LunaAssistantService {
   private output?: vscode.OutputChannel;
+  // Webviews can steal focus; VS Code may report activeTextEditor as undefined.
+  // Keep the last active editor so we can still grab "current file" context.
+  private lastActiveEditor?: vscode.TextEditor;
 
-  constructor(private readonly context: vscode.ExtensionContext, private readonly kb: KnowledgeBaseService) {}
+  constructor(private readonly context: vscode.ExtensionContext, private readonly kb: KnowledgeBaseService) {
+    // Track last active editor. This fixes the UX where the user types in the assistant webview
+    // but expects "current file" to refer to the code editor they were just working in.
+    const sub = vscode.window.onDidChangeActiveTextEditor(ed => {
+      if (ed) this.lastActiveEditor = ed;
+    });
+    this.context.subscriptions.push(sub);
+
+    // Also initialize from the current active editor (if any) at activation time.
+    if (vscode.window.activeTextEditor) this.lastActiveEditor = vscode.window.activeTextEditor;
+  }
 
   async isEnabled(): Promise<boolean> {
     return getAssistantConfig().enabled;
@@ -178,6 +191,7 @@ export class LunaAssistantService {
   }
 
   async ask(question: string, onDelta?: (deltaText: string) => void): Promise<string> {
+    question = await this.maybeAugmentQuestionWithEditorContext(question);
     const folder = this.kb.getActiveFolder();
     if (!folder) throw new Error('Откройте папку (workspace) в VS Code.');
 
@@ -280,6 +294,108 @@ export class LunaAssistantService {
 
     return formatAnswerWithSources(finalText, sources);
   }
+
+
+  /**
+   * Если пользователь пишет в окне ассистента фразы вроде "в текущем файле" / "в открытой программе" /
+   * "в редакторе" (или про выделение), то мы автоматически прикладываем текст из активного редактора.
+   * Это убирает необходимость копировать код руками в чат.
+   */
+  private async maybeAugmentQuestionWithEditorContext(question: string): Promise<string> {
+    const q = String(question ?? '').trim();
+    if (!q) return q;
+
+    // Triggers (RU + a bit of EN).
+    // NOTE: Do NOT use \b word boundaries for Russian text.
+    // JS regex word boundaries are ASCII-centric and won't reliably match Cyrillic words.
+    // Use normalized substring triggers instead.
+    const qNorm = q.toLowerCase();
+    const wantSelection =
+      [
+        'в выделенном',
+        'в выделении',
+        'в выделенном фрагменте',
+        'в выделенном коде',
+        'selected code',
+        'selection'
+      ].some(p => qNorm.includes(p));
+    const wantFile =
+      [
+        'в текущем файле',
+        'в текущей программе',
+        'в открытой программе',
+        'в открытом файле',
+        'в активном файле',
+        'в активном редакторе',
+        'в редакторе',
+        'current file',
+        'open file',
+        'active editor'
+      ].some(p => qNorm.includes(p));
+
+    if (!wantSelection && !wantFile) return q;
+
+    // In WebView-based UIs VS Code may report activeTextEditor as undefined.
+    // Fallback to the last active editor, and then to any visible text editor.
+    const editor =
+      vscode.window.activeTextEditor ||
+      this.lastActiveEditor ||
+      vscode.window.visibleTextEditors.find(e => e?.document?.uri?.scheme === 'file');
+    if (!editor) return q;
+
+    const doc = editor.document;
+    const baseCfg = withDerivedDefaults(getAssistantConfig());
+
+    let code = '';
+    let rangeStr = '';
+
+    if (wantSelection && editor.selection && !editor.selection.isEmpty) {
+      const sel = editor.selection;
+      code = doc.getText(sel);
+      rangeStr = `L${sel.start.line + 1}:${sel.start.character + 1}–L${sel.end.line + 1}:${sel.end.character + 1}`;
+    } else if (wantFile) {
+      code = doc.getText();
+      rangeStr = `L1:1–L${doc.lineCount}:1`;
+    } else {
+      return q;
+    }
+
+    code = clampTextByChars(code, baseCfg.editorContextMaxChars || 20000);
+    if (!code.trim()) return q;
+
+    const filePath = vscode.workspace.asRelativePath(doc.uri, false);
+    const language = doc.languageId;
+    const fence = guessFence(language, filePath);
+
+    const header =
+      wantSelection && editor.selection && !editor.selection.isEmpty
+        ? `
+
+---
+Контекст из активного редактора (выделенный фрагмент)
+Файл: ${filePath}
+Диапазон: ${rangeStr}
+Язык/тип: ${language}
+
+Код:
+
+`
+        : `
+
+---
+Контекст из активного редактора (текущий файл)
+Файл: ${filePath}
+Диапазон: ${rangeStr}
+Язык/тип: ${language}
+
+Код:
+
+`;
+
+    return q + header + '```' + fence + '\n' + code + '\n```';
+  }
+
+
 
   async explainSelection(): Promise<void> {
     const editor = vscode.window.activeTextEditor;

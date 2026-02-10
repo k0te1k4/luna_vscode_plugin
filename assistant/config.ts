@@ -31,6 +31,7 @@ export type AssistantConfig = {
   queryEmbeddingModelUri: string;
   generationModelUri: string;
   codeExplainMaxChars: number;
+  editorContextMaxChars: number;
 };
 
 export function getAssistantConfig(): AssistantConfig {
@@ -49,7 +50,8 @@ export function getAssistantConfig(): AssistantConfig {
     docEmbeddingModelUri: cfg.get<string>('assistant.docEmbeddingModelUri', ''),
     queryEmbeddingModelUri: cfg.get<string>('assistant.queryEmbeddingModelUri', ''),
     generationModelUri: cfg.get<string>('assistant.generationModelUri', ''),
-    codeExplainMaxChars: clamp(cfg.get<number>('assistant.codeExplain.maxChars', 16000), 2000, 200000)
+    codeExplainMaxChars: clamp(cfg.get<number>('assistant.codeExplain.maxChars', 16000), 2000, 200000),
+    editorContextMaxChars: clamp(cfg.get<number>('assistant.editorContext.maxChars', 20000), 2000, 400000)
   };
 }
 

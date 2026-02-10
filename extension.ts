@@ -110,7 +110,9 @@ export function activate(context: vscode.ExtensionContext) {
     // NEW: explain selection
     vscode.commands.registerCommand('luna.assistant.explainSelection', async () => {
       try {
-        await assistant.explainSelection();
+        panel.show();
+        // Use the same chat UI, but inject editor selection as context.
+        await panel.runAsk('Объясни, что делает код в выделенном фрагменте.');
       } catch (err: any) {
         vscode.window.showErrorMessage(err?.message ?? String(err));
       }
@@ -119,7 +121,9 @@ export function activate(context: vscode.ExtensionContext) {
     // NEW: explain whole file
     vscode.commands.registerCommand('luna.assistant.explainFile', async () => {
       try {
-        await assistant.explainFile();
+        panel.show();
+        // Use the chat UI, and let the service automatically attach the current file.
+        await panel.runAsk('Объясни, что делает код в текущем файле.');
       } catch (err: any) {
         vscode.window.showErrorMessage(err?.message ?? String(err));
       }

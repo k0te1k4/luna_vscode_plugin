@@ -20,6 +20,11 @@ documents.listen(connection);
 const faData = new Map();      // uri -> { fragments, kernelsUsed (aliases), varTypes, cfCalls, imports(alias->cName) }
 const ucodesData = new Map();  // uri -> { kernelsImplemented (C names), kernelParams (C names -> [types]) }
 
+// Если ucodes.cpp не открыт в редакторе, читаем и анализируем его с диска,
+// чтобы диагностики в .fa работали без необходимости «открывать вкладку ucodes.cpp».
+// Храним mtime, чтобы переанализировать файл при изменении на диске.
+const ucodesDiskMtime = new Map(); // uri -> mtimeMs
+
 function isFa(uri) {
   return uri.toLowerCase().endsWith('.fa');
 }
@@ -29,6 +34,53 @@ function isUcodes(uri) {
 }
 
 // ----------- УТИЛИТЫ -----------
+
+function getSiblingUcodesUri(faUri) {
+  const slash = faUri.lastIndexOf('/');
+  if (slash < 0) return null;
+  return faUri.substring(0, slash) + '/ucodes.cpp';
+}
+
+function ensureUcodesAnalyzedFromDisk(ucodesUri) {
+  if (!ucodesUri) return;
+  // Если документ открыт — анализ идёт по events документов.
+  if (documents.get(ucodesUri)) return;
+
+  let ucodesPath;
+  try {
+    ucodesPath = fileURLToPath(ucodesUri);
+  } catch {
+    return;
+  }
+
+  if (!ucodesPath || !fs.existsSync(ucodesPath)) {
+    ucodesData.delete(ucodesUri);
+    ucodesDiskMtime.delete(ucodesUri);
+    return;
+  }
+
+  try {
+    const st = fs.statSync(ucodesPath);
+    const mtimeMs = st.mtimeMs;
+    const prev = ucodesDiskMtime.get(ucodesUri);
+    if (prev === mtimeMs && ucodesData.has(ucodesUri)) {
+      return; // актуально
+    }
+
+    const text = fs.readFileSync(ucodesPath, 'utf8');
+    const res = analyzeUcodes(text);
+    ucodesData.set(ucodesUri, res);
+    ucodesDiskMtime.set(ucodesUri, mtimeMs);
+    connection.console.log(
+      `[LuNA] analyzed ucodes.cpp from disk: ${ucodesUri}, kernelsImplemented=${res.kernelsImplemented.size}`
+    );
+  } catch (e) {
+    // В случае ошибки чтения/парсинга не ломаем весь LSP.
+    connection.console.error(
+      '[LuNA] failed to analyze ucodes.cpp from disk: ' + (e && e.stack ? e.stack : String(e))
+    );
+  }
+}
 
 function normalizeLuNAType(t) {
   if (!t) return 'unknown';
@@ -266,6 +318,14 @@ documents.onDidClose(e => {
 // ----------- ДИАГНОСТИКИ -----------
 
 function publishDiagnosticsForAll() {
+  // Важно: ucodes.cpp может быть не открыт в редакторе.
+  // Чтобы не было ложных предупреждений «не найдено ни в одном ucodes.cpp» до открытия вкладки,
+  // подхватываем и анализируем соседний ucodes.cpp с диска для каждого .fa.
+  for (const faUri of faData.keys()) {
+    const ucodesUri = getSiblingUcodesUri(faUri);
+    if (ucodesUri) ensureUcodesAnalyzedFromDisk(ucodesUri);
+  }
+
   const { allUsedKernels, allImplementedKernels } = recomputeProjectIndex();
 
   // карта: C-имя ядра -> ожидаемые типы аргументов

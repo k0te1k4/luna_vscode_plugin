@@ -79,6 +79,33 @@ class AssistantPanel {
             }
         });
     }
+
+    /**
+     * Run an "ask" from the extension side (e.g. from a command), but render the result inside the chat panel.
+     */
+    async runAsk(question) {
+        var _a, _b;
+        const q = String((_a = question) !== null && _a !== void 0 ? _a : '').trim();
+        if (!q)
+            return;
+        if (!this.panel)
+            this.show();
+        if (!this.panel)
+            return;
+        const webview = this.panel.webview;
+        webview.postMessage({ type: 'user', text: 'Вы: ' + q });
+        const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        webview.postMessage({ type: 'answerStart', requestId });
+        try {
+            const a = await this.cb.onAsk(q, deltaText => {
+                webview.postMessage({ type: 'answerDelta', requestId, delta: deltaText });
+            });
+            webview.postMessage({ type: 'answerDone', requestId, answer: a });
+        }
+        catch (e) {
+            webview.postMessage({ type: 'error', text: (_b = e === null || e === void 0 ? void 0 : e.message) !== null && _b !== void 0 ? _b : String(e) });
+        }
+    }
 }
 exports.AssistantPanel = AssistantPanel;
 function getHtml() {
@@ -169,11 +196,12 @@ function getHtml() {
           add('Ассистент: ' + (msg.answer||''));
         }
       }
+      if (msg?.type === 'user') add(msg.text, 'me');
       if (msg?.type === 'system') add(msg.text);
       if (msg?.type === 'error') add('Ошибка: ' + msg.text, 'err');
     });
 
-    add('Подсказка: если ассистент выключен, включите настройку luna.assistant.enabled и задайте API key командой “LuNA: Set Yandex API Key”.');
+    add('Подсказка: можно писать “в текущем файле/в открытой программе/в редакторе” — ассистент сам приложит код из активного редактора. Если ассистент выключен, включите настройку luna.assistant.enabled и задайте API key командой “LuNA: Set Yandex API Key”.');
   </script>
 </body>
 </html>`;
